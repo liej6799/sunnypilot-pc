@@ -32,7 +32,7 @@ from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.modeld.models.commonmodel_pyx import DrivingModelFrame, CLContext
 
 
-PROCESS_NAME = "selfdrive.modeld.modeld"
+PROCESS_NAME = "selfdrive.modeld.modeld_rknn"
 SEND_RAW_PRED = os.getenv('SEND_RAW_PRED')
 RUN_EVERY_FRAME = os.getenv('MODELD_20HZ') is not None  # every frame (20Hz) vs every-other (10Hz default)
 
@@ -96,11 +96,12 @@ class ModelState:
     self.policy_output = np.zeros(policy_output_size, dtype=np.float32)
     self.parser = Parser()
 
-    with open(VISION_PKL_PATH, "rb") as f:
-      self.vision_run = pickle.load(f)
-
-    with open(POLICY_PKL_PATH, "rb") as f:
-      self.policy_run = pickle.load(f)
+    from openpilot.selfdrive.modeld.rknn_zc import ZCModel
+    _M = Path(__file__).parent / 'models'
+    self._rkv = ZCModel(str(_M / 'driving_vision.rknn'), core_mask=7)
+    self._rkp = ZCModel(str(_M / 'driving_policy.rknn'))
+    self._np_imgs = {}
+    cloudlog.warning("modeld_rknn: zero-copy C-API RKNN runner on NPU")
 
   def slice_outputs(self, model_outputs: np.ndarray, output_slices: dict[str, slice]) -> dict[str, np.ndarray]:
     parsed_model_outputs = {k: model_outputs[np.newaxis, v] for k,v in output_slices.items()}
@@ -129,20 +130,25 @@ class ModelState:
           self.vision_inputs[key] = qcom_tensor_from_opencl_address(imgs_cl[key].mem_address, self.vision_input_shapes[key], dtype=dtypes.uint8)
     else:
       for key in imgs_cl:
-        frame_input = self.frames[key].buffer_from_cl(imgs_cl[key]).reshape(self.vision_input_shapes[key])
-        self.vision_inputs[key] = Tensor(frame_input, dtype=dtypes.uint8).realize()
+        self._np_imgs[key] = self.frames[key].buffer_from_cl(imgs_cl[key]).reshape(self.vision_input_shapes[key])
 
     if prepare_only:
       return None
 
-    self.vision_output = self.vision_run(**self.vision_inputs).numpy().flatten()
+    self._rkv.fill_u8(0, self._np_imgs['input_imgs'])
+    self._rkv.fill_u8(1, self._np_imgs['big_input_imgs'])
+    self._rkv.run()
+    self.vision_output = self._rkv.output(0)
     vision_outputs_dict = self.parser.parse_vision_outputs(self.slice_outputs(self.vision_output, self.vision_output_slices))
 
     self.full_features_buffer[0,:-1] = self.full_features_buffer[0,1:]
     self.full_features_buffer[0,-1] = vision_outputs_dict['hidden_state'][0, :]
     self.numpy_inputs['features_buffer'][:] = self.full_features_buffer[0, self.temporal_idxs]
 
-    self.policy_output = self.policy_run(**self.policy_inputs).numpy().flatten()
+    for _i, _k in enumerate(['desire', 'traffic_convention', 'lateral_control_params', 'prev_desired_curv', 'features_buffer']):
+      self._rkp.fill_f32(_i, self.numpy_inputs[_k])
+    self._rkp.run()
+    self.policy_output = self._rkp.output(0)
     policy_outputs_dict = self.parser.parse_policy_outputs(self.slice_outputs(self.policy_output, self.policy_output_slices))
 
     # TODO model only uses last value now

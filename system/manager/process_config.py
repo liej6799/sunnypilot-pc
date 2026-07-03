@@ -11,6 +11,7 @@ from sunnypilot.sunnylink.utils import sunnylink_need_register, sunnylink_ready,
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 NO_DM = os.getenv("NO_DM") is not None
+USE_RKNN = os.getenv("USE_RKNN") is not None
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started or params.get_bool("IsDriverViewEnabled")
@@ -106,7 +107,8 @@ procs = [
   PythonProcess("micd", "system.micd", iscar, enabled=not PC),
   PythonProcess("timed", "system.timed", always_run, enabled=not PC),
 
-  PythonProcess("modeld", "selfdrive.modeld.modeld", and_(only_onroad, is_stock_model)),
+  PythonProcess("modeld", "selfdrive.modeld.modeld", and_(only_onroad, is_stock_model), enabled=not USE_RKNN),
+  PythonProcess("modeld_rknn", "selfdrive.modeld.modeld_rknn", and_(only_onroad, is_stock_model), enabled=USE_RKNN),
   PythonProcess("dmonitoringmodeld", "selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(not NO_DM)),
 
   NativeProcess("sensord", "system/sensord", ["./sensord"], only_onroad, enabled=not PC),

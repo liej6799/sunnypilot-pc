@@ -112,3 +112,6 @@ Pipfile
 !.idea/customTargets.xml
 !.idea/tools/*
 !.run/*
+
+# RKNN compiled models (regenerable from onnx via rknn-toolkit2)
+*.rknn
