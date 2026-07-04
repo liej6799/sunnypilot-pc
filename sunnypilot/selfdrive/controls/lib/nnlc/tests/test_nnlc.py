@@ -1,5 +1,4 @@
 import numpy as np
-from parameterized import parameterized
 
 from cereal import car, log, messaging
 from opendbc.car.car_helpers import interfaces
@@ -8,6 +7,7 @@ from opendbc.car.honda.values import CAR as HONDA
 from opendbc.car.hyundai.values import CAR as HYUNDAI
 from opendbc.car.toyota.values import CAR as TOYOTA
 from opendbc.car.vehicle_model import VehicleModel
+from openpilot.common.parameterized import parameterized
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.car.helpers import convert_to_capnp
@@ -46,7 +46,7 @@ class TestNeuralNetworkLateralControl:
   @parameterized.expand([HONDA.HONDA_CIVIC, TOYOTA.TOYOTA_RAV4, HYUNDAI.HYUNDAI_SANTA_CRUZ_1ST_GEN, GM.CHEVROLET_BOLT_EUV])
   def test_saturation(self, car_name):
     params = Params()
-    params.put_bool("NeuralNetworkLateralControl", True)
+    params.put_bool("NeuralNetworkLateralControl", True, block=True)
 
     CarInterface = interfaces[car_name]
     CP = CarInterface.get_non_essential_params(car_name)

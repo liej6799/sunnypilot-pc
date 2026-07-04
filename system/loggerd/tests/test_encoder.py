@@ -7,7 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from parameterized import parameterized
+from openpilot.common.parameterized import parameterized
 from tqdm import trange
 
 from openpilot.common.params import Params
@@ -53,7 +53,7 @@ class TestEncoder:
   # TODO: this should run faster than real time
   @parameterized.expand([(True, ), (False, )])
   def test_log_rotation(self, record_front):
-    Params().put_bool("RecordFront", record_front)
+    Params().put_bool("RecordFront", record_front, block=True)
 
     managed_processes['sensord'].start()
     managed_processes['loggerd'].start()

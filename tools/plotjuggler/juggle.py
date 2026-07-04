@@ -21,7 +21,7 @@ juggle_dir = os.path.dirname(os.path.realpath(__file__))
 
 os.environ['LD_LIBRARY_PATH'] = os.environ.get('LD_LIBRARY_PATH', '') + f":{juggle_dir}/bin/"
 
-DEMO_ROUTE = "a2a0ccea32023010|2023-07-27--13-01-19"
+DEMO_ROUTE = "5beb9b58bd12b691/0000010a--a51155e496"
 RELEASES_URL = "https://github.com/commaai/PlotJuggler/releases/download/latest"
 INSTALL_DIR = os.path.join(juggle_dir, "bin")
 PLOTJUGGLER_BIN = os.path.join(juggle_dir, "bin/plotjuggler")
@@ -29,9 +29,21 @@ MINIMUM_PLOTJUGGLER_VERSION = (3, 5, 2)
 MAX_STREAMING_BUFFER_SIZE = 1000
 
 
+def print_jotpluggler_banner():
+  purple = "\033[95m" if sys.stdout.isatty() else ""
+  reset = "\033[0m" if purple else ""
+  print(f"{purple}+-------------------------------------------------------------+{reset}")
+  print(f"{purple}|{reset} JotPluggler is the future! Try it like this:                {purple}|{reset}")
+  print(f"{purple}|{reset}   ./tools/jotpluggler/jotpluggler --demo --layout tuning    {purple}|{reset}")
+  print(f"{purple}|{reset}                                                             {purple}|{reset}")
+  print(f"{purple}|{reset} PlotJuggler will be deleted soon.                           {purple}|{reset}")
+  print(f"{purple}|{reset} Missing a feature? Open an issue or post in #dev-openpilot. {purple}|{reset}")
+  print(f"{purple}+-------------------------------------------------------------+{reset}")
+
+
 def install():
   m = f"{platform.system()}-{platform.machine()}"
-  supported = ("Linux-x86_64", "Linux-aarch64", "Darwin-arm64", "Darwin-x86_64")
+  supported = ("Linux-x86_64", "Linux-aarch64", "Darwin-arm64")
   if m not in supported:
     raise Exception(f"Unsupported platform: '{m}'. Supported platforms: {supported}")
 
@@ -118,9 +130,14 @@ if __name__ == "__main__":
   parser.add_argument("route_or_segment_name", nargs='?', help="The route or segment name to plot (cabana share URL accepted)")
 
   if len(sys.argv) == 1:
+    print_jotpluggler_banner()
+    print()
     parser.print_help()
     sys.exit()
   args = parser.parse_args()
+
+  print_jotpluggler_banner()
+  print()
 
   if args.install:
     install()

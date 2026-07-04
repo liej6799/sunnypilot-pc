@@ -9,7 +9,7 @@
 
 #define __STDC_CONSTANT_MACROS
 
-#include "third_party/libyuv/include/libyuv.h"
+#include "libyuv.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -70,6 +70,10 @@ void FfmpegEncoder::encoder_close() {
 
   avcodec_free_context(&codec_ctx);
   is_open = false;
+}
+
+void FfmpegEncoder::set_bitrate(int bitrate) {
+  LOGE("adaptive bitrate is not supported for ffmpeg encoder %s", encoder_info.publish_name);
 }
 
 int FfmpegEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {

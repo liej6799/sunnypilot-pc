@@ -109,6 +109,8 @@ class SunnylinkState:
     self.sunnylink_dongle_id = self._params.get("SunnylinkDongleId")
     self._api = SunnylinkApi(self.sunnylink_dongle_id)
 
+    self._panel_open = False
+
     self._load_initial_state()
 
   def _load_initial_state(self) -> None:
@@ -139,7 +141,7 @@ class SunnylinkState:
       response = self._api.api_get(f"device/{self.sunnylink_dongle_id}/roles", method='GET', access_token=token, session=self._session)
       if response.status_code == 200:
         roles = response.text
-        self._params.put("SunnylinkCache_Roles", roles)
+        self._params.put("SunnylinkCache_Roles", roles, block=True)
         with self._lock:
           self._roles = _parse_roles(roles)
           sponsor_tier = self._get_highest_tier()
@@ -158,7 +160,7 @@ class SunnylinkState:
       response = self._api.api_get(f"device/{self.sunnylink_dongle_id}/users", method='GET', access_token=token, session=self._session)
       if response.status_code == 200:
         users = response.text
-        self._params.put("SunnylinkCache_Users", users)
+        self._params.put("SunnylinkCache_Users", users, block=True)
         with self._lock:
           self._users = _parse_users(users)
     except Exception as e:
@@ -166,9 +168,14 @@ class SunnylinkState:
 
   def _worker_thread(self) -> None:
     while self._running:
-      if self.is_connected():
-        self._fetch_roles()
-        self._fetch_users()
+      with self._lock:
+        panel_open = self._panel_open
+
+      if panel_open:
+        self._sm.update()
+        if self.is_connected():
+          self._fetch_roles()
+          self._fetch_users()
 
       for _ in range(int(self.FETCH_INTERVAL / self.SLEEP_INTERVAL)):
         if not self._running:
@@ -219,6 +226,10 @@ class SunnylinkState:
       return rl.Color(147, 112, 219, 255)
     else:
       return style.ITEM_TEXT_VALUE_COLOR
+
+  def set_settings_open(self, _open: bool) -> None:
+    with self._lock:
+      self._panel_open = _open
 
   def __del__(self):
     self.stop()

@@ -5,6 +5,7 @@ import pyray as rl
 
 from openpilot.common.api import api_get
 from openpilot.common.params import Params
+from openpilot.common.realtime import drop_realtime
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.ui.lib.api_helpers import get_token
 from openpilot.selfdrive.ui.ui_state import ui_state, device
@@ -13,7 +14,8 @@ from openpilot.system.ui.lib.application import gui_app, FontWeight, FONT_SCALE
 from openpilot.system.ui.lib.wrap_text import wrap_text
 from openpilot.system.ui.lib.scroll_panel2 import GuiScrollPanel2
 from openpilot.system.ui.lib.multilang import tr, trn, tr_noop
-from openpilot.system.ui.widgets import Widget, NavWidget
+from openpilot.system.ui.widgets import Widget
+from openpilot.system.ui.widgets.scroller import NavRawScrollPanel
 
 TITLE = tr_noop("Firehose Mode")
 DESCRIPTION = tr_noop(
@@ -80,12 +82,12 @@ class FirehoseLayoutBase(Widget):
   def _render(self, rect: rl.Rectangle):
     # compute total content height for scrolling
     content_height = self._measure_content_height(rect)
-    scroll_offset = round(self._scroll_panel.update(rect, content_height))
+    scroll_offset = self._scroll_panel.update(rect, content_height)
 
     # start drawing with offset
-    x = int(rect.x + 40)
-    y = int(rect.y + 40 + scroll_offset)
-    w = int(rect.width - 80)
+    x = rect.x + 40
+    y = rect.y + 40 + scroll_offset
+    w = rect.width - 80
 
     # Title
     title_text = tr(TITLE)
@@ -99,7 +101,7 @@ class FirehoseLayoutBase(Widget):
     y += 20
 
     # Separator
-    rl.draw_rectangle(x, y, w, 2, self.GRAY)
+    rl.draw_rectangle_rec(rl.Rectangle(x, y, w, 2), self.GRAY)
     y += 20
 
     # Status
@@ -115,7 +117,7 @@ class FirehoseLayoutBase(Widget):
       y += 20
 
     # Separator
-    rl.draw_rectangle(x, y, w, 2, self.GRAY)
+    rl.draw_rectangle_rec(rl.Rectangle(x, y, w, 2), self.GRAY)
     y += 20
 
     # Instructions intro
@@ -131,9 +133,6 @@ class FirehoseLayoutBase(Widget):
       y = self._draw_wrapped_text(x, y, w, tr(question), gui_app.font(FontWeight.BOLD), 32, self.LIGHT_GRAY)
       y = self._draw_wrapped_text(x, y, w, tr(answer), gui_app.font(FontWeight.ROMAN), 32, self.LIGHT_GRAY)
       y += 20
-
-    # return value not used by NavWidget
-    return -1
 
   def _draw_wrapped_text(self, x, y, width, text, font, font_size, color):
     wrapped = wrap_text(font, text, font_size, width)
@@ -214,15 +213,12 @@ class FirehoseLayoutBase(Widget):
       cloudlog.error(f"Failed to fetch firehose stats: {e}")
 
   def _update_loop(self):
+    drop_realtime()
     while self._running:
       if not ui_state.started and device._awake:
         self._fetch_firehose_stats()
       time.sleep(self.UPDATE_INTERVAL)
 
 
-class FirehoseLayout(FirehoseLayoutBase, NavWidget):
-  BACK_TOUCH_AREA_PERCENTAGE = 0.1
-
-  def __init__(self, back_callback):
-    super().__init__()
-    self.set_back_callback(back_callback)
+class FirehoseLayout(NavRawScrollPanel, FirehoseLayoutBase):
+  pass

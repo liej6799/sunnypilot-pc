@@ -2,7 +2,7 @@ import pytest
 import itertools
 import numpy as np
 
-from parameterized import parameterized_class
+from openpilot.common.parameterized import parameterized_class
 from cereal import log
 from openpilot.selfdrive.car.cruise import VCruiseHelper, V_CRUISE_MIN, V_CRUISE_MAX, V_CRUISE_INITIAL, IMPERIAL_INCREMENT
 from cereal import car, custom
@@ -94,7 +94,7 @@ class TestVCruiseHelper:
         self.enable(V_CRUISE_INITIAL * CV.KPH_TO_MS, False, False)
 
       # Expected diff on enabling. Speed should not change on falling edge of pressed
-      assert not pressed == self.v_cruise_helper.v_cruise_kph == self.v_cruise_helper.v_cruise_kph_last
+      assert (not pressed) == (self.v_cruise_helper.v_cruise_kph == self.v_cruise_helper.v_cruise_kph_last)
 
   def test_resume_in_standstill(self):
     """

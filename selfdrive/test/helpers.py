@@ -18,15 +18,15 @@ def set_params_enabled():
   os.environ['LOGPRINT'] = "debug"
 
   params = Params()
-  params.put("HasAcceptedTerms", terms_version)
-  params.put("CompletedTrainingVersion", training_version)
-  params.put_bool("OpenpilotEnabledToggle", True)
+  params.put("HasAcceptedTerms", terms_version, block=True)
+  params.put("CompletedTrainingVersion", training_version, block=True)
+  params.put_bool("OpenpilotEnabledToggle", True, block=True)
 
   # valid calib
   msg = messaging.new_message('liveCalibration')
   msg.liveCalibration.validBlocks = 20
   msg.liveCalibration.rpyCalib = [0.0, 0.0, 0.0]
-  params.put("CalibrationParams", msg.to_bytes())
+  params.put("CalibrationParams", msg.to_bytes(), block=True)
 
 def release_only(f):
   @wraps(f)
@@ -35,6 +35,43 @@ def release_only(f):
       pytest.skip("This test is only for release branches")
     f(self, *args, **kwargs)
   return wrap
+
+
+def collect_logs(services, duration):
+  socks = [messaging.sub_sock(s, conflate=False, timeout=100) for s in services]
+  logs = []
+  start = time.monotonic()
+  while time.monotonic() - start < duration:
+    for s in socks:
+      logs.extend(messaging.drain_sock(s))
+  return logs
+
+
+@contextlib.contextmanager
+def log_collector(services):
+  """Background thread that continuously drains messages from services.
+     Use when the main thread needs to do blocking work (e.g. capturing images)."""
+  socks = [messaging.sub_sock(s, conflate=False, timeout=100) for s in services]
+  raw_logs = []
+  lock = threading.Lock()
+  stop_event = threading.Event()
+
+  def _drain():
+    while not stop_event.is_set():
+      for s in socks:
+        msgs = messaging.drain_sock(s)
+        if msgs:
+          with lock:
+            raw_logs.extend(msgs)
+      time.sleep(0.01)
+
+  thread = threading.Thread(target=_drain, daemon=True)
+  thread.start()
+  try:
+    yield raw_logs, lock
+  finally:
+    stop_event.set()
+    thread.join(timeout=2)
 
 
 @contextlib.contextmanager
