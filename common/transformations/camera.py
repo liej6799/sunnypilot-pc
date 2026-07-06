@@ -52,6 +52,17 @@ _ar_ox_config = DeviceCameraConfig(CameraConfig(1928, 1208, 2648.0), _ar_ox_fish
 _os_config = DeviceCameraConfig(CameraConfig(2688 // 2, 1520 // 2, 1522.0 * 3 / 4), _os_fisheye, _os_fisheye)
 _neo_config = DeviceCameraConfig(CameraConfig(1164, 874, 910.0), CameraConfig(816, 612, 650.0), _NoneCameraConfig())
 
+# [op9] OnePlus 9 (lemonade). camerad publishes FULL-res NV12 (no downscale); modeld's warp
+# crops/resizes each frame to the model input (256x128) using these intrinsics, so they must
+# match the actual sensor buffer geometry (else the warp samples the wrong region).
+#   road  = IMX766 4096x3072, focal 8.0mm  / 1.6um binned px -> fl_pix = 8.0/0.0016   = 5000
+#   wide  = IMX689 4000x3000, focal 1.71mm / 1.2um px        -> fl_pix = 1.71/0.0012  = 1425
+# focal lengths are first-order (from hw.h focal_len + sensor pixel_size); refine with a real
+# calibration capture (get_view_frame_from_road_frame residuals).
+_op9_road = CameraConfig(4096, 3072, 5000.0)
+_op9_wide = CameraConfig(4000, 3000, 1425.0)
+_op9_config = DeviceCameraConfig(_op9_road, _op9_wide, _op9_wide)
+
 DEVICE_CAMERAS = {
   # A "device camera" is defined by a device type and sensor
 
@@ -69,6 +80,16 @@ DEVICE_CAMERAS = {
 }
 prods = itertools.product(('tici', 'tizi', 'mici'), (('ar0231', _ar_ox_config), ('ox03c10', _ar_ox_config), ('os04c10', _os_config)))
 DEVICE_CAMERAS.update({(d, c[0]): c[1] for d, c in prods})
+
+# [op9] get_device_type() returns the raw devicetree model string on the OnePlus 9 (no "comma "
+# prefix to strip), so key on that plus the imx766/imx689 sensor names camerad reports.
+_op9_device_type = "Qualcomm Technologies, Inc. Lahaina MTP lemonade"
+DEVICE_CAMERAS.update({
+  (_op9_device_type, "imx766"): _op9_config,
+  (_op9_device_type, "imx689"): _op9_config,
+  ("tici", "imx766"): _op9_config,
+  ("tici", "imx689"): _op9_config,
+})
 
 # device/mesh : x->forward, y-> right, z->down
 # view : x->right, y->down, z->forward
