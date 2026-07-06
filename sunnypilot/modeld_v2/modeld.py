@@ -158,14 +158,27 @@ class ModelState(ModelStateBase):
     nv12_info = get_nv12_info(cam_w, cam_h)
     self.frame_buf_params = dict.fromkeys(self._vision_input_names, nv12_info)
 
-    self._run_policy = jits[(cam_w, cam_h)]['run_policy']
-    self._warp_enqueue = jits[(cam_w, cam_h)]['warp_enqueue']
+    # [op9] support legacy two-stage pkls: per-res entry is the vision-only warp_enqueue
+    # TinyJit (NOT a dict), and run_policy is top-level, consuming the warped img/big_img
+    # + policy queues + action_t. The post-tinygrad-bump format wraps both in a dict and
+    # merges warp+policy into one run_policy(frame, big_frame, **queues) call.
+    _res = jits[(cam_w, cam_h)]
+    self._two_stage = not isinstance(_res, dict)
+    if self._two_stage:
+      self._warp_enqueue, self._run_policy = _res, jits['run_policy']
+      self.numpy_inputs['action_t'] = np.zeros((1, 2), dtype=np.float32)
+      self.input_queues['action_t'] = Tensor(self.numpy_inputs['action_t'], device='NPY').realize()
+    else:
+      self._run_policy, self._warp_enqueue = _res['run_policy'], _res['warp_enqueue']
     road_name = next(k for k in self._vision_input_names if 'big' not in k)
     yuv_size = self.frame_buf_params[road_name][3]
-    self._warp_enqueue(
-      **self.input_queues,
-      frame=Tensor(np.zeros(yuv_size, dtype=np.uint8), device=self.DEV).contiguous().realize(),
-      big_frame=Tensor(np.zeros(yuv_size, dtype=np.uint8), device=self.DEV).contiguous().realize())
+    _zero_frame = lambda: Tensor(np.zeros(yuv_size, dtype=np.uint8), device=self.DEV).contiguous().realize()
+    if self._two_stage:
+      self._warp_enqueue(img_q=self.input_queues['img_q'], big_img_q=self.input_queues['big_img_q'],
+                         tfm=self.input_queues['tfm'], big_tfm=self.input_queues['big_tfm'],
+                         frame=_zero_frame(), big_frame=_zero_frame())
+    else:
+      self._warp_enqueue(**self.input_queues, frame=_zero_frame(), big_frame=_zero_frame())
 
 
   @property
@@ -205,11 +218,22 @@ class ModelState(ModelStateBase):
     self.numpy_inputs['tfm'][:, :] = transforms[road_key].reshape(3, 3)
     self.numpy_inputs['big_tfm'][:, :] = transforms[wide_key].reshape(3, 3)
 
-    if prepare_only:
-      self._warp_enqueue(**self.input_queues, frame=self.full_frames[road_key], big_frame=self.full_frames[wide_key])
-      return None
-
-    raw_outputs = self._run_policy(**self.input_queues, frame=self.full_frames[road_key], big_frame=self.full_frames[wide_key])
+    if self._two_stage:
+      img, big_img = self._warp_enqueue(
+        img_q=self.input_queues['img_q'], big_img_q=self.input_queues['big_img_q'],
+        tfm=self.input_queues['tfm'], big_tfm=self.input_queues['big_tfm'],
+        frame=self.full_frames[road_key], big_frame=self.full_frames[wide_key])
+      if prepare_only:
+        return None
+      raw_outputs = self._run_policy(
+        img=img, big_img=big_img, feat_q=self.input_queues['feat_q'], desire_q=self.input_queues['desire_q'],
+        desire=self.input_queues['desire'], traffic_convention=self.input_queues['traffic_convention'],
+        action_t=self.input_queues['action_t'])
+    else:
+      if prepare_only:
+        self._warp_enqueue(**self.input_queues, frame=self.full_frames[road_key], big_frame=self.full_frames[wide_key])
+        return None
+      raw_outputs = self._run_policy(**self.input_queues, frame=self.full_frames[road_key], big_frame=self.full_frames[wide_key])
 
     if self._combined_model_type == 'supercombo':
       model_output = raw_outputs.numpy().flatten()
@@ -326,9 +350,16 @@ def main(demo=False):
   DH = DesireHelper()
   meta_constants = load_meta_constants()
 
+  # [op9] the two rear sensors free-run and cannot be hardware-synced (the imx766 road cam
+  # crash-dumps the SoC on any frame-length retime, the imx689 wide FLL is clamped at its
+  # readout minimum) -> their SOFs drift ~0.2ms/frame. Pairing therefore matches on the
+  # HALF-PERIOD of the actual ~67ms (15 Hz) frame, and a residual offset up to half a period
+  # is expected -- not an error. Upstream used 25ms (comma's 20 Hz half-period).
+  HALF_PERIOD_NS = 34_000_000
+  oos_count = 0
   while True:
     # Keep receiving frames until we are at least 1 frame ahead of previous extra frame
-    while meta_main.timestamp_sof < meta_extra.timestamp_sof + 25000000:
+    while meta_main.timestamp_sof < meta_extra.timestamp_sof + HALF_PERIOD_NS:
       buf_main = vipc_client_main.recv()
       meta_main = FrameMeta(vipc_client_main)
       if buf_main is None:
@@ -339,20 +370,24 @@ def main(demo=False):
       continue
 
     if use_extra_client:
-      # Keep receiving extra frames until frame id matches main camera
+      # advance extra to the frame temporally closest to main (within one half-period)
       while True:
         buf_extra = vipc_client_extra.recv()
         meta_extra = FrameMeta(vipc_client_extra)
-        if buf_extra is None or meta_main.timestamp_sof < meta_extra.timestamp_sof + 25000000:
+        if buf_extra is None or meta_main.timestamp_sof < meta_extra.timestamp_sof + HALF_PERIOD_NS:
           break
 
       if buf_extra is None:
         cloudlog.debug("vipc_client_extra no frame")
         continue
 
-      if abs(meta_main.timestamp_sof - meta_extra.timestamp_sof) > 10000000:
-        cloudlog.error(f"frames out of sync! main: {meta_main.frame_id} ({meta_main.timestamp_sof / 1e9:.5f}),\
-                       extra: {meta_extra.frame_id} ({meta_extra.timestamp_sof / 1e9:.5f})")
+      # only a genuine desync (> half a period, i.e. a dropped/wrong pairing) is an error;
+      # sub-half-period drift is unavoidable on these free-running sensors. rate-limit the log.
+      if abs(meta_main.timestamp_sof - meta_extra.timestamp_sof) > HALF_PERIOD_NS:
+        oos_count += 1
+        if oos_count % 50 == 1:
+          cloudlog.error(f"frames out of sync! main: {meta_main.frame_id} ({meta_main.timestamp_sof / 1e9:.5f}),\
+                         extra: {meta_extra.frame_id} ({meta_extra.timestamp_sof / 1e9:.5f})")
 
     else:
       # Use single camera
