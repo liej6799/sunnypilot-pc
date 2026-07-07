@@ -312,6 +312,8 @@ class ModelState(ModelStateBase):
 
 
 def main(demo=False):
+  # [op9] allow demo mode via env too (the manager launcher calls main() with no args)
+  demo = demo or (os.getenv("MODELD_DEMO") == "1")
   cloudlog.warning("modeld init")
 
   sentry.set_tag("daemon", PROCESS_NAME)
