@@ -6,25 +6,44 @@
 #include <string>
 #include <vector>
 
+#include <libusb-1.0/libusb.h>
+
 
 #define TIMEOUT 0
 #define SPI_BUF_SIZE 2048
 
 
-class PandaSpiHandle {
+// [op9] Common interface for talking to a panda over either USB or SPI. Upstream
+// openpilot dropped the USB handle (comma 3X is SPI-only); restored here so the
+// OnePlus 9's external USB panda (white/STM32F4) works. See flowpilot op9_pandad_usb.
+class PandaCommsHandle {
 public:
+  PandaCommsHandle(std::string serial = "") {}
+  virtual ~PandaCommsHandle() {}
+
   std::string hw_serial;
   std::atomic<bool> connected = true;
   std::atomic<bool> comms_healthy = true;
 
+  virtual void cleanup() = 0;
+
+  virtual int control_write(uint8_t request, uint16_t param1, uint16_t param2, unsigned int timeout=TIMEOUT) = 0;
+  virtual int control_read(uint8_t request, uint16_t param1, uint16_t param2, unsigned char *data, uint16_t length, unsigned int timeout=TIMEOUT) = 0;
+  virtual int bulk_write(unsigned char endpoint, unsigned char* data, int length, unsigned int timeout=TIMEOUT) = 0;
+  virtual int bulk_read(unsigned char endpoint, unsigned char* data, int length, unsigned int timeout=TIMEOUT) = 0;
+};
+
+
+class PandaSpiHandle : public PandaCommsHandle {
+public:
   PandaSpiHandle(std::string serial);
   ~PandaSpiHandle();
 
-  int control_write(uint8_t request, uint16_t param1, uint16_t param2, unsigned int timeout=TIMEOUT);
-  int control_read(uint8_t request, uint16_t param1, uint16_t param2, unsigned char *data, uint16_t length, unsigned int timeout=TIMEOUT);
-  int bulk_write(unsigned char endpoint, unsigned char* data, int length, unsigned int timeout=TIMEOUT);
-  int bulk_read(unsigned char endpoint, unsigned char* data, int length, unsigned int timeout=TIMEOUT);
-  void cleanup();
+  int control_write(uint8_t request, uint16_t param1, uint16_t param2, unsigned int timeout=TIMEOUT) override;
+  int control_read(uint8_t request, uint16_t param1, uint16_t param2, unsigned char *data, uint16_t length, unsigned int timeout=TIMEOUT) override;
+  int bulk_write(unsigned char endpoint, unsigned char* data, int length, unsigned int timeout=TIMEOUT) override;
+  int bulk_read(unsigned char endpoint, unsigned char* data, int length, unsigned int timeout=TIMEOUT) override;
+  void cleanup() override;
 
   static std::vector<std::string> list();
 
@@ -49,4 +68,26 @@ private:
 
   spi_header header;
   uint32_t xfer_count = 0;
+};
+
+
+// [op9] USB panda handle (libusb), restored for the OnePlus 9 external USB panda.
+class PandaUsbHandle : public PandaCommsHandle {
+public:
+  PandaUsbHandle(std::string serial);
+  ~PandaUsbHandle();
+
+  int control_write(uint8_t request, uint16_t param1, uint16_t param2, unsigned int timeout=TIMEOUT) override;
+  int control_read(uint8_t request, uint16_t param1, uint16_t param2, unsigned char *data, uint16_t length, unsigned int timeout=TIMEOUT) override;
+  int bulk_write(unsigned char endpoint, unsigned char* data, int length, unsigned int timeout=TIMEOUT) override;
+  int bulk_read(unsigned char endpoint, unsigned char* data, int length, unsigned int timeout=TIMEOUT) override;
+  void cleanup() override;
+
+  static std::vector<std::string> list();
+
+private:
+  libusb_context *ctx = NULL;
+  libusb_device_handle *dev_handle = NULL;
+  std::mutex hw_lock;
+  void handle_usb_issue(int err, const char func[]);
 };

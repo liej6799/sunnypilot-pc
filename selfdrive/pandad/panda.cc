@@ -13,8 +13,15 @@
 const bool PANDAD_MAXOUT = getenv("PANDAD_MAXOUT") != nullptr;
 
 Panda::Panda(std::string serial) {
-  handle = std::make_unique<PandaSpiHandle>(serial);
-  LOGW("connected to %s over SPI", serial.c_str());
+  // [op9] Try SPI first (comma 3X internal panda), then fall back to USB (OnePlus 9
+  // external panda). Whichever handle constructs successfully is used.
+  try {
+    handle = std::make_unique<PandaSpiHandle>(serial);
+    LOGW("connected to %s over SPI", serial.c_str());
+  } catch (const std::exception &e) {
+    handle = std::make_unique<PandaUsbHandle>(serial);  // throws if no USB panda either
+    LOGW("connected to %s over USB", serial.c_str());
+  }
 
   hw_type = get_hw_type();
   can_reset_communications();
@@ -33,7 +40,11 @@ std::string Panda::hw_serial() {
 }
 
 std::vector<std::string> Panda::list() {
-  return PandaSpiHandle::list();
+  // [op9] enumerate both SPI and USB pandas
+  std::vector<std::string> serials = PandaSpiHandle::list();
+  std::vector<std::string> usb_serials = PandaUsbHandle::list();
+  serials.insert(serials.end(), usb_serials.begin(), usb_serials.end());
+  return serials;
 }
 
 void Panda::set_safety_model(cereal::CarParams::SafetyModel safety_model, uint16_t safety_param) {

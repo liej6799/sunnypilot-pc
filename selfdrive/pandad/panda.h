@@ -45,7 +45,7 @@ struct can_frame {
 
 class Panda {
 private:
-  std::unique_ptr<PandaSpiHandle> handle;
+  std::unique_ptr<PandaCommsHandle> handle;  // [op9] base type: USB or SPI
 
 public:
   Panda(std::string serial);

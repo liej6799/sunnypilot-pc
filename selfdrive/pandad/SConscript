@@ -1,8 +1,9 @@
 Import('env', 'arch', 'common', 'messaging')
 
 if arch != "Darwin":
-  libs = [common, messaging, 'pthread']
-  panda = env.Library('panda', ['panda.cc', 'spi.cc'])
+  # [op9] usb (libusb) added so pandad talks to the OnePlus 9's external USB panda
+  libs = [common, messaging, 'pthread', 'usb-1.0']
+  panda = env.Library('panda', ['panda.cc', 'spi.cc', 'usb.cc'])
 
   env.Program('pandad', ['main.cc', 'pandad.cc', 'panda_safety.cc'], LIBS=[panda] + libs)
 

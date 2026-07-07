@@ -27,7 +27,12 @@ public:
       {"mici", cereal::InitData::DeviceType::MICI}
     };
     static const auto it = device_map.find(get_name());
-    assert(it != device_map.end());
+    // [op9] The OnePlus 9 devicetree model is not tici/tizi/mici. Rather than assert (which
+    // killed pandad on this device), fall back to TICI -- the OP9 runs the pipeline as a
+    // larch64/tici-class device (see the CI=1 / touch /TICI usage elsewhere).
+    if (it == device_map.end()) {
+      return cereal::InitData::DeviceType::TICI;
+    }
     return it->second;
   }
 
