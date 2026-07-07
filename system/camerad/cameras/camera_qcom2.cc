@@ -18,6 +18,48 @@
 
 ExitHandler do_exit;
 
+// [op9ae] warm-up: first N frames run at a fixed fast/mid exposure (keeps frames
+// arriving quickly for first-frame-sync; avoids reacting to garbage BPS scratch).
+static const int AE_WARMUP_FRAMES = 4;
+static const int AE_WARMUP_T = 800;  // mid integration, fast enough for the sync watchdog
+static const int AE_WARMUP_G = 0;    // 1.0x
+
+// [op9ae] AE brightness target. The upstream DYNAMIC target-grey curve depends on
+// cur_ev * ev_scale magnitudes calibrated to comma's OX03C10/OS04C10 — not these Sony
+// sensors, so it lands arbitrarily dark (~0.13) here. A fixed target is the reliable
+// lever (ev_scale cancels out of desired_ev, so it only fed the dynamic curve anyway).
+// Tuned on the OP9 for a bright, low-noise indoor image. OP9_AE_TARGET overrides;
+// OP9_AE_TARGET=0 restores the dynamic curve.
+static const float AE_DEFAULT_TARGET = 0.30f;
+
+// [op9sync] SOF phase-lock: the two OP9 sensors free-run with different mode frame
+// periods (road 67.140ms vs wide 67.336ms -> 196us/frame relative drift), so their SOF
+// offset sweeps +-33ms every ~23s and modeld's +-10ms frame pairing drops ~30% of frames.
+// The road (imx766) mode FLL is its legal minimum (can't shorten), so the road cam tracks
+// the slower wide cam: per frame, trim the road sensor's FRM_LENGTH_LINES to match the
+// wide period and steer the SOF offset to zero. Single camerad event thread -> plain statics.
+static uint64_t sync_wide_sof = 0;        // latest WIDE_ROAD SOF (ns)
+static int64_t sync_wide_period_ns = 0;   // EMA of the wide cam's frame period
+static const int env_sync_log = getenv("OP9_SYNC_LOG") ? std::max(1, atoi(getenv("OP9_SYNC_LOG"))) : 0;
+
+// [op9sync] PASSIVE monitor only: logs the road-vs-wide SOF phase error. It never
+// touches the sensor. Mid-stream per-frame FLL i2c writes were tried and correlated
+// with hard SoC crash-dumps (silent, no kernel trace, evidence lost to page cache) --
+// see camera/README.md. Sync is instead achieved with init-time period matching
+// (imx766.cc OP9_ROAD_FLL) + phase-aligned deferred sensor start (camerad_thread).
+static void sof_sync_monitor(const SpectraCamera &camera) {
+  if (!env_sync_log || camera.cc.stream_type != VISION_STREAM_ROAD) return;
+  if (!sync_wide_sof || !sync_wide_period_ns) return;
+  if (camera.buf.cur_frame_data.frame_id % env_sync_log != 0) return;
+  const int64_t p = sync_wide_period_ns;
+  const uint64_t sof = camera.buf.cur_frame_data.timestamp_sof;
+  if ((int64_t)(sof - sync_wide_sof) > 500000000LL) return;  // wide stalled
+  int64_t e = ((int64_t)(sof - sync_wide_sof) % p + p) % p;  // phase error in [0, p)
+  int64_t d = std::min(e, p - e);                            // distance to alignment
+  fprintf(stderr, "[op9sync] road f%u e=%.3fms |d|=%.3fms (wide p=%.4fms)\n",
+          camera.buf.cur_frame_data.frame_id, e / 1e6, d / 1e6, p / 1e6);
+}
+
 // for debugging
 const bool env_debug_frames = getenv("DEBUG_FRAMES") != nullptr;
 const bool env_log_raw_frames = getenv("LOG_RAW_FRAMES") != nullptr;
@@ -102,6 +144,15 @@ void CameraState::set_exposure_rect() {
     std::min((int)(fl_pix / fl_ref * xywh_ref.w), (int)camera.buf.out_img_width / 2 + (int)(fl_pix / fl_ref * xywh_ref.w / 2)),
     std::min((int)(fl_pix / fl_ref * xywh_ref.h), (int)camera.buf.out_img_height / 2 + (int)(fl_pix / fl_ref * (h_ref / 2 - xywh_ref.y)))
   };
+  // [op9ae] the reference geometry assumes comma's 1928x1208 buffers; on the OP9 sensor
+  // modes the computed w can extend past the row end (cam0: x=0 w=4179 on a 4000-wide
+  // image) -> AE samples out-of-row pixels. Clamp to the actual output image.
+  ae_xywh.x = std::clamp(ae_xywh.x, 0, (int)camera.buf.out_img_width - 2);
+  ae_xywh.y = std::clamp(ae_xywh.y, 0, (int)camera.buf.out_img_height - 2);
+  ae_xywh.w = std::clamp(ae_xywh.w, 2, (int)camera.buf.out_img_width - ae_xywh.x);
+  ae_xywh.h = std::clamp(ae_xywh.h, 2, (int)camera.buf.out_img_height - ae_xywh.y);
+  fprintf(stderr, "[op9ae] cam%d ae rect x=%d y=%d w=%d h=%d (img %dx%d)\n", camera.cc.camera_num,
+          ae_xywh.x, ae_xywh.y, ae_xywh.w, ae_xywh.h, (int)camera.buf.out_img_width, (int)camera.buf.out_img_height);
 }
 
 void CameraState::update_exposure_score(float desired_ev, int exp_t, int exp_g_idx, float exp_gain) {
@@ -115,12 +166,46 @@ void CameraState::update_exposure_score(float desired_ev, int exp_t, int exp_g_i
 
 void CameraState::set_camera_exposure(float grey_frac) {
   if (!camera.enabled) return;
+  // [op9sync] track the wide cam's SOF + frame period (the sync reference)
+  if (camera.cc.stream_type == VISION_STREAM_WIDE_ROAD) {
+    const uint64_t sof = camera.buf.cur_frame_data.timestamp_sof;
+    if (sync_wide_sof) {
+      int64_t d = (int64_t)(sof - sync_wide_sof);
+      if (d > 45000000LL && d < 95000000LL) {  // reject gaps (recovery/drops)
+        if (!sync_wide_period_ns && env_sync_log)
+          fprintf(stderr, "[op9sync] wide reference locked: period %.4fms\n", d / 1e6);
+        sync_wide_period_ns = sync_wide_period_ns ? (sync_wide_period_ns * 7 + d) / 8 : d;
+      }
+    }
+    sync_wide_sof = sof;
+  }
+  // [op9ae] The first few BPS outputs contain uninitialized/garbage data (grey reads ~1.0).
+  // Do NOT skip programming during them: the first-frame-sync watchdog needs frames to keep
+  // arriving fast, so the sensor must be pulled off the slow OP9_INTEG startup exposure
+  // immediately. Instead program a fixed, fast, mid exposure for the warm-up frames and only
+  // start the closed-loop control once real data is flowing.
+  if (camera.buf.cur_frame_data.frame_id < AE_WARMUP_FRAMES) {
+    exposure_time = AE_WARMUP_T;
+    gain_idx = AE_WARMUP_G;
+    analog_gain_frac = camera.sensor->sensor_analog_gains[gain_idx];
+    dc_gain_enabled = false;
+    cur_ev[camera.buf.cur_frame_data.frame_id % 3] = exposure_time * analog_gain_frac * get_gain_factor();
+    auto warm = camera.sensor->getExposureRegisters(exposure_time, gain_idx, false);
+    camera.sensors_i2c(warm.data(), warm.size(), CAM_SENSOR_PACKET_OPCODE_SENSOR_CONFIG, camera.sensor->data_word);
+    return;
+  }
+  // [op9ae] pitch-black median is exactly 0 -> desired_ev divides by zero. Floor it.
+  grey_frac = std::max(grey_frac, 1.0f / 256);
   std::vector<double> target_grey_minimums = {0.1, 0.1, 0.125}; // wide, road, driver
 
   const float dt = 0.05;
 
   const float ts_grey = 10.0;
-  const float ts_ev = 0.05;
+  // [op9ae] upstream ts_ev=0.05 (k_ev=0.5) assumes the exact 3-frame apply latency of
+  // comma's per-request sensor programming. Our free-run + immediate-i2c path has a
+  // longer, jittery latency (GPH latch + BPS pipeline) and k_ev=0.5 limit-cycles
+  // (grey 0.05<->0.33). Slow the EV filter so delayed feedback stays stable.
+  const float ts_ev = 0.4;
 
   const float k_grey = (dt / ts_grey) / (1.0 + dt / ts_grey);
   const float k_ev = (dt / ts_ev) / (1.0 + dt / ts_ev);
@@ -136,6 +221,9 @@ void CameraState::set_camera_exposure(float grey_frac) {
 
   // Scale target grey between min and 0.4 depending on lighting conditions
   float new_target_grey = std::clamp(0.4 - 0.3 * log2(1.0 + sensor->target_grey_factor*cur_ev_) / log2(6000.0), target_grey_minimums[camera.cc.camera_num], 0.4);
+  // [op9ae] fixed brightness target (see AE_DEFAULT_TARGET). >0 -> fixed; =0 -> dynamic curve.
+  static const float ae_target_env = getenv("OP9_AE_TARGET") ? (float)atof(getenv("OP9_AE_TARGET")) : AE_DEFAULT_TARGET;
+  if (ae_target_env > 0.0f) new_target_grey = ae_target_env;
   float target_grey = (1.0 - k_grey) * target_grey_fraction + k_grey * new_target_grey;
 
   float desired_ev = std::clamp(cur_ev_ / sensor->ev_scale * target_grey / grey_frac, sensor->min_ev, sensor->max_ev);
@@ -209,6 +297,15 @@ void CameraState::set_camera_exposure(float grey_frac) {
 
   auto exp_reg_array = sensor->getExposureRegisters(exposure_time, new_exp_g, dc_gain_enabled);
   camera.sensors_i2c(exp_reg_array.data(), exp_reg_array.size(), CAM_SENSOR_PACKET_OPCODE_SENSOR_CONFIG, camera.sensor->data_word);
+  sof_sync_monitor(camera);  // [op9sync] passive phase telemetry (never writes the sensor)
+
+  // [op9ae] AE telemetry: OP9_AE_LOG=<N> prints every Nth frame per camera.
+  static const int ae_log_every = getenv("OP9_AE_LOG") ? std::max(1, atoi(getenv("OP9_AE_LOG"))) : 0;
+  if (ae_log_every && (camera.buf.cur_frame_data.frame_id % ae_log_every == 0)) {
+    fprintf(stderr, "[op9ae] cam%d f%u grey=%.4f target=%.3f desired_ev=%.0f -> t=%d g=%d(%.2fx)\n",
+            camera.cc.camera_num, camera.buf.cur_frame_data.frame_id, grey_frac, target_grey,
+            desired_ev, exposure_time, gain_idx, analog_gain_frac);
+  }
 }
 
 void CameraState::sendState() {
@@ -247,15 +344,16 @@ void CameraState::sendState() {
 void camerad_thread() {
   // TODO: centralize enabled handling
 
-  VisionIpcServer v("camerad");
+  VisionIpcServer v("camerad"); fprintf(stderr,"[op9] A: after VisionIpcServer\n"); fflush(stderr);
 
   // *** initial ISP init ***
   SpectraMaster m;
-  m.init();
+  fprintf(stderr,"[op9] B: before m.init\n"); fflush(stderr); m.init(); fprintf(stderr,"[op9] C: after m.init\n"); fflush(stderr);
 
   // *** per-cam init ***
   std::vector<std::unique_ptr<CameraState>> cams;
   for (const auto &config : ALL_CAMERA_CONFIGS) {
+    if (!config.enabled) continue;  // [op9] only construct/probe ENABLED cams -> isolated single-camera test, no cross-CCI interference
     auto cam = std::make_unique<CameraState>(&m, config);
     cam->init(&v);
     cams.emplace_back(std::move(cam));
@@ -286,7 +384,7 @@ void camerad_thread() {
       if (ev.type == V4L_EVENT_CAM_REQ_MGR_EVENT) {
         struct cam_req_mgr_message *event_data = (struct cam_req_mgr_message *)ev.u.data;
         if (env_debug_frames) {
-          printf("sess_hdl 0x%6X, link_hdl 0x%6X, frame_id %lu, req_id %lu, timestamp %.2f ms, sof_status %d\n", event_data->session_hdl, event_data->u.frame_msg.link_hdl,
+          printf("sess_hdl 0x%6X, link_hdl 0x%6X, frame_id %llu, req_id %llu, timestamp %.2f ms, sof_status %d\n", event_data->session_hdl, event_data->u.frame_msg.link_hdl,
                  event_data->u.frame_msg.frame_id, event_data->u.frame_msg.request_id, event_data->u.frame_msg.timestamp/1e6, event_data->u.frame_msg.sof_status);
           do_exit = do_exit || event_data->u.frame_msg.frame_id > (1*20);
         }

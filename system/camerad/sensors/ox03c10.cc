@@ -1,7 +1,8 @@
 #include <cmath>
 
 #include "system/camerad/sensors/sensor.h"
-#include <media/msm_camsensor_sdk.h>
+// [op9] dropped dead include <media/msm_camsensor_sdk.h> (legacy header absent in the
+// SM8350 UAPI; no symbol from it is used -- i2c_random_wr_payload comes via sensor.h)
 
 namespace {
 

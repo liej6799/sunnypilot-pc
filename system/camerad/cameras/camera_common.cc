@@ -71,16 +71,30 @@ kj::Array<uint8_t> get_raw_frame_image(const CameraBuf *b) {
 float calculate_exposure_value(const CameraBuf *b, Rect ae_xywh, int x_skip, int y_skip) {
   int lum_med;
   uint32_t lum_binning[256] = {0};
+  // [op9] prefer the RAW Bayer buffer for AE when available (ISP_RAW_OUTPUT path): the
+  // software debayer's brightness/gamma LUT otherwise brightens the NV12 Y and fools AE
+  // into under-exposing (gain pinned at 1x, weak raw signal, crushed dynamic range ->
+  // "white light became black"). Measuring pre-LUT raw (10-bit) makes AE expose the sensor
+  // correctly regardless of the tone curve applied downstream.
+  const bool use_raw = (b->cur_camera_buf != nullptr) && (b->cur_camera_buf->addr != nullptr);
+  const uint16_t *raw_ptr = use_raw ? (const uint16_t *)b->cur_camera_buf->addr : nullptr;
   const uint8_t *pix_ptr = b->cur_yuv_buf->y;
+  // [op9ae] NV12 rows are stride-pitched (4096), not out_img_width-pitched. Indexing
+  // with width (4000 on the imx689) walks diagonally through the Y plane -> AE
+  // measures garbage. Use the vipc buffer's real stride.
+  const int pitch = (int)b->cur_yuv_buf->stride;
 
   unsigned int lum_total = 0;
   for (int y = ae_xywh.y; y < ae_xywh.y + ae_xywh.h; y += y_skip) {
     for (int x = ae_xywh.x; x < ae_xywh.x + ae_xywh.w; x += x_skip) {
-      uint8_t lum = pix_ptr[(y * b->out_img_width) + x];
+      // raw is 10-bit in a 16-bit container (PLAIN16_10); >>2 to a [0..255] bin so the
+      // existing median/256 return path is reused with the same grey-fraction targets.
+      uint8_t lum = use_raw ? (uint8_t)(raw_ptr[(y * pitch) + x] >> 2) : pix_ptr[(y * pitch) + x];
       lum_binning[lum]++;
       lum_total += 1;
     }
   }
+  if (lum_total == 0) return 0.5f;  // [op9ae] degenerate rect guard (avoid div-by-zero -> grey=1.0 -> AE slams dark)
 
   // Find mean lumimance value
   unsigned int lum_cur = 0;

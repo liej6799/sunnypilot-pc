@@ -24,6 +24,11 @@ const int MIPI_SETTLE_CNT = 33;  // Calculated by camera_freqs.py
 
 // CSLDeviceType/CSLPacketOpcodesIFE from camx
 // cam_packet_header.op_code = (device << 24) | (opcode);
+// [op9] MIPI CSI-2 data types (were in the legacy media/msm_camsensor_sdk.h,
+// not present in the SM8350 UAPI; these are standard CSI-2 DT constants)
+#define CSI_RAW8   0x2A
+#define CSI_RAW10  0x2B
+#define CSI_RAW12  0x2C
 #define CSLDeviceTypeImageSensor (0x01 << 24)
 #define CSLDeviceTypeIFE         (0x0F << 24)
 #define CSLDeviceTypeBPS         (0x10 << 24)
@@ -156,6 +161,7 @@ public:
   void configICP();
   void configCSIPHY();
   void linkDevices();
+  void startDevices();
   void destroySyncObjectAt(int index);
 
   // *** state ***
@@ -198,6 +204,9 @@ public:
   SpectraBuf bps_linearization_lut;
   SpectraBuf bps_gamma_lut;
   SpectraBuf bps_fullres_dummy;
+  SpectraBuf bps_subp;     // [op9] stock SUBP sub-program buffer (e90091)
+  SpectraBuf bps_iqlut;    // [op9] stock IQ LUT super-buffer (e6008e)
+  bool bps_fw_mapped = false;  // [op9] FW_MEM_MAP is one-shot (re-mapping the same region times out the FW)
   std::vector<uint32_t> bps_lin_reg;
   std::vector<uint32_t> bps_ccm_reg;
 
@@ -207,6 +216,7 @@ public:
   int sync_objs_bps[MAX_IFE_BUFS] = {};
   uint64_t request_id_last = 0;
   uint64_t last_requeue_ts = 0;
+  uint64_t requeue_from_request_id = 0;  // [op9] stale-SOF gate: reject req ids older than the last requeue base
   uint64_t frame_id_raw_last = 0;
   int invalid_request_count = 0;
   bool skip_expected = true;

@@ -23,6 +23,7 @@ struct CameraConfig {
   cereal::FrameData::Builder (cereal::Event::Builder::*init_camera_state)();
   bool enabled;
   uint32_t phy;
+  int csiphy_index;  // [op9] CSIPHY subdev index (may differ from camera_num)
   bool vignetting_correction;
   SpectraOutputType output_type;
   bool staggered_sof;  // SOF is staggered (half-period offset) from other cameras
@@ -37,9 +38,19 @@ const CameraConfig WIDE_ROAD_CAMERA_CONFIG = {
   .publish_name = "wideRoadCameraState",
   .init_camera_state = &cereal::Event::Builder::initWideRoadCameraState,
   .enabled = !getenv("DISABLE_WIDE_ROAD"),
-  .phy = CAM_ISP_IFE_IN_RES_PHY_0,
+  .phy = CAM_ISP_IFE_IN_RES_PHY_1,  // [op9/imx689] main wide IN_RES_PHY_1 matches CSIPHY 1 (was PHY_2 BUG)
+  .csiphy_index = 1,
   .vignetting_correction = false,
-  .output_type = ISP_IFE_PROCESSED,
+  // [op9] OP9_FD switches the imx689 WIDE cam to the IFE-processed pixel pipe so the self-contained
+  // FD scaler (-> WM8/9 NV12) runs; otherwise the proven RAW->GPU-demosaic path.
+  // [op9] Running BOTH cameras through the shared BPS core hangs the CICP firmware ("BPS hang dump",
+  // bpsmodule.c:386) -> one cam's ctx gets flushed (CAM_CTX_FLUSHED) and dies. So when the road cam
+  // uses BPS, the wide must take a BPS-free path:
+  //   OP9_WIDE_RAW: RDI raw + the in-camerad software debayer -> NV12 (no pixel pipe, no BPS; proven).
+  //   OP9_WIDE_FD:  IFE-FD scaler NV12 (pixel-pipe FD chroma still image-size/CCIF-violates; WIP).
+  .output_type = getenv("OP9_WIDE_RAW") ? ISP_RAW_OUTPUT :
+                 (getenv("OP9_WIDE_FD") ? ISP_IFE_PROCESSED :
+                 (getenv("OP9_BPS") ? ISP_BPS_PROCESSED : (getenv("OP9_FD") ? ISP_IFE_PROCESSED : ISP_RAW_OUTPUT))),
   .staggered_sof = false,
 };
 
@@ -50,9 +61,17 @@ const CameraConfig ROAD_CAMERA_CONFIG = {
   .publish_name = "roadCameraState",
   .init_camera_state = &cereal::Event::Builder::initRoadCameraState,
   .enabled = !getenv("DISABLE_ROAD"),
-  .phy = CAM_ISP_IFE_IN_RES_PHY_1,
-  .vignetting_correction = true,
-  .output_type = ISP_IFE_PROCESSED,
+  .phy = CAM_ISP_IFE_IN_RES_PHY_2,  // [op9] IMX766 on CSIPHY 2
+  .csiphy_index = 2,
+  .vignetting_correction = false,
+  // [op9] camX/HAL bpftrace (VFE_OUT_CONFIG capture) PROVES the HAL streams the IMX766
+  // wide via the RDI raw path (WM port 0x3007 = CAM_ISP_IFE_OUT_RES_RDI_1), NOT the
+  // debayer/pixel pipe -- which is why VFE:2's pixel modules read 0 under the HAL and
+  // why ISP_IFE_PROCESSED hangs (SM8350 debayer regs differ from tici). Use RAW like
+  // the HAL; the WM is armed via the per-frame VFE_OUT_CONFIG blob (virtual_frame_en=0).
+  // [op9] OP9_BPS routes the imx766 ultra-wide RDI raw through the offline BPS -> NV12 (4096x3072),
+  // using the captured imx766 SUBP-model blobs (bps_replay_blobs_uw.h). Raw path unchanged otherwise.
+  .output_type = getenv("OP9_BPS") ? ISP_BPS_PROCESSED : ISP_RAW_OUTPUT,
   .staggered_sof = false,
 };
 
@@ -64,6 +83,7 @@ const CameraConfig DRIVER_CAMERA_CONFIG = {
   .init_camera_state = &cereal::Event::Builder::initDriverCameraState,
   .enabled = !getenv("DISABLE_DRIVER"),
   .phy = CAM_ISP_IFE_IN_RES_PHY_2,
+  .csiphy_index = 5,
   .vignetting_correction = false,
   .output_type = ISP_BPS_PROCESSED,
   .staggered_sof = true,

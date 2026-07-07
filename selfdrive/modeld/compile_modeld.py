@@ -42,7 +42,9 @@ WARP_DEV = os.getenv('WARP_DEV')
 
 
 def make_random_images(keys, shape, device=None):
-  return {k: Tensor.randint(shape, low=0, high=256, dtype='uint8', device=device).realize() for k in keys}
+  # [op9] shape may be a dict keyed by input name (asymmetric main/big camera geometries)
+  shapes = shape if isinstance(shape, dict) else {k: shape for k in keys}
+  return {k: Tensor.randint(shapes[k], low=0, high=256, dtype='uint8', device=device).realize() for k in keys}
 
 
 def warp_perspective_tinygrad(src_flat, M_inv, dst_shape, src_shape, stride_pad, border_fill_val=None):
@@ -154,8 +156,10 @@ def sample_desire(buf, frame_skip):
   return buf.reshape(-1, frame_skip, *buf.shape[1:]).max(1).flatten(0, 1).unsqueeze(0)
 
 
-def make_warp(nv12, model_w, model_h, frame_skip):
+def make_warp(nv12, model_w, model_h, frame_skip, big_nv12=None):
+  # [op9] big_nv12: distinct geometry for the big (wide) camera when it differs from the main
   frame_prepare = make_frame_prepare(nv12, model_w, model_h)
+  big_frame_prepare = make_frame_prepare(big_nv12, model_w, model_h) if big_nv12 is not None else frame_prepare
   sample_skip_fn = partial(sample_skip, frame_skip=frame_skip)
 
   def warp_enqueue(img_q, big_img_q, tfm, big_tfm, frame, big_frame):
@@ -164,7 +168,7 @@ def make_warp(nv12, model_w, model_h, frame_skip):
     Tensor.realize(tfm, big_tfm)
 
     warped_frame = frame_prepare(frame, tfm).unsqueeze(0).to(Device.DEFAULT)
-    warped_big_frame = frame_prepare(big_frame, big_tfm).unsqueeze(0).to(Device.DEFAULT)
+    warped_big_frame = big_frame_prepare(big_frame, big_tfm).unsqueeze(0).to(Device.DEFAULT)
     img = shift_and_sample(img_q, warped_frame, sample_skip_fn)
     big_img = shift_and_sample(big_img_q, warped_big_frame, sample_skip_fn)
     return img, big_img
@@ -250,6 +254,12 @@ def _parse_size(s):
   return int(w), int(h)
 
 
+def _parse_pair(s):
+  # [op9] "MAINWxMAINH:BIGWxBIGH" -> ((mw, mh), (bw, bh))
+  a, b = s.split(':')
+  return _parse_size(a), _parse_size(b)
+
+
 def read_file_chunked_to_shm(path):
   from openpilot.common.file_chunker import read_file_chunked
   from openpilot.system.hardware.hw import Paths
@@ -268,6 +278,8 @@ if __name__ == "__main__":
   p.add_argument('--model-size', type=_parse_size, required=True, help='model input WxH')
   p.add_argument('--camera-resolutions', type=_parse_size, nargs='+', required=True,
                  help='camera resolutions WxH (one or more)')
+  p.add_argument('--camera-resolution-pairs', type=_parse_pair, nargs='*', default=[],
+                 help='[op9] asymmetric main:big camera resolutions "WxH:WxH" (JIT keyed (mw,mh,bw,bh))')
   p.add_argument('--vision-onnx', required=True)
   p.add_argument('--on-policy-onnx', required=True)
   p.add_argument('--output', required=True)
@@ -293,6 +305,15 @@ if __name__ == "__main__":
     make_random_warp_inputs = partial(make_random_images, keys=['frame', 'big_frame'], shape=nv12.size, device=WARP_DEV)
     warp_enqueue = TinyJit(make_warp(nv12, model_w, model_h, args.frame_skip), prune=True)
     out[(cam_w,cam_h)] = compile_jit(warp_enqueue, make_random_warp_inputs, WARP_INPUTS, args.frame_skip, vision_metadata, on_policy_metadata)
+
+  # [op9] asymmetric main/big warp JITs (e.g. OP9 road imx766 4096x3072 + wide imx689 4000x3000)
+  for (mw, mh), (bw, bh) in args.camera_resolution_pairs:
+    nv12_m = NV12Frame(mw, mh, *get_nv12_info(mw, mh))
+    nv12_b = NV12Frame(bw, bh, *get_nv12_info(bw, bh))
+    make_random_warp_inputs = partial(make_random_images, keys=['frame', 'big_frame'],
+                                      shape={'frame': nv12_m.size, 'big_frame': nv12_b.size}, device=WARP_DEV)
+    warp_enqueue = TinyJit(make_warp(nv12_m, model_w, model_h, args.frame_skip, big_nv12=nv12_b), prune=True)
+    out[(mw, mh, bw, bh)] = compile_jit(warp_enqueue, make_random_warp_inputs, WARP_INPUTS, args.frame_skip, vision_metadata, on_policy_metadata)
 
   with open(args.output, "wb") as f:
     pickle.dump(out, f)

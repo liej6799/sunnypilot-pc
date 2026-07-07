@@ -78,9 +78,12 @@ class FrameMeta:
 class ModelState(ModelStateBase):
   prev_desire: np.ndarray  # for tracking the rising edge of the pulse
 
-  def __init__(self, cam_w: int, cam_h: int, usbgpu: bool):
+  def __init__(self, cam_w: int, cam_h: int, usbgpu: bool, extra_w: int | None = None, extra_h: int | None = None):
+    # [op9] extra_w/extra_h: geometry of the extra (wide) camera when it differs from the main
+    # (OP9: road imx766 4096x3072, wide imx689 4000x3000). Defaults to the main geometry.
     ModelStateBase.__init__(self)
     self.LAT_SMOOTH_SECONDS = LAT_SMOOTH_SECONDS
+    extra_w, extra_h = extra_w or cam_w, extra_h or cam_h
     input_devices = get_tg_input_devices(PROCESS_NAME, usbgpu)
     self.WARP_DEV, self.QUEUE_DEV = input_devices['WARP_DEV'], input_devices['QUEUE_DEV']
     jits = pickle.loads(read_file_chunked(modeld_pkl_path(usbgpu)))
@@ -100,9 +103,14 @@ class ModelState(ModelStateBase):
     self.full_frames: dict[str, Tensor] = {}
     self._blob_cache: dict[int, Tensor] = {}
     self.parser = Parser()
-    self.frame_buf_params = {k: get_nv12_info(cam_w, cam_h) for k in ('img', 'big_img')}
+    # [op9] per-camera NV12 geometry: 'img' = main cam, 'big_img' = extra/wide cam
+    self.frame_buf_params = {'img': get_nv12_info(cam_w, cam_h), 'big_img': get_nv12_info(extra_w, extra_h)}
     self.run_policy = jits['run_policy']
-    self.warp_enqueue = jits[(cam_w,cam_h)]
+    warp_key = (cam_w, cam_h) if (extra_w, extra_h) == (cam_w, cam_h) else (cam_w, cam_h, extra_w, extra_h)
+    self.warp_enqueue = jits[warp_key]
+    # jits is a defaultdict -- a missing key silently yields {}; fail loudly instead
+    assert callable(self.warp_enqueue), \
+      f"no warp JIT for {warp_key}; compiled: {[k for k in jits.keys() if isinstance(k, tuple)]}"
 
   def slice_outputs(self, model_outputs: np.ndarray, output_slices: dict[str, slice]) -> dict[str, np.ndarray]:
     parsed_model_outputs = {k: model_outputs[np.newaxis, v] for k,v in output_slices.items()}
@@ -188,7 +196,10 @@ def main(demo=False):
 
   st = time.monotonic()
   cloudlog.warning("loading model")
-  model = ModelState(vipc_client_main.width, vipc_client_main.height, USBGPU)
+  # [op9] pass the extra (wide) camera's own geometry when it differs from the main
+  model = ModelState(vipc_client_main.width, vipc_client_main.height, USBGPU,
+                     extra_w=vipc_client_extra.width if use_extra_client else None,
+                     extra_h=vipc_client_extra.height if use_extra_client else None)
   cloudlog.warning(f"models loaded in {time.monotonic() - st:.1f}s, modeld starting")
 
   # messaging
