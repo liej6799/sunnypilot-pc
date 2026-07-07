@@ -759,16 +759,22 @@ class GuiApplication(GuiApplicationExt):
       except Exception as e:
         text_str = f"[Log decode error: {e}]"
 
-      if log_level == rl.TraceLogLevel.LOG_ERROR:
-        cloudlog.error(f"raylib: {text_str}")
-      elif log_level == rl.TraceLogLevel.LOG_WARNING:
-        cloudlog.warning(f"raylib: {text_str}")
-      elif log_level == rl.TraceLogLevel.LOG_INFO:
-        cloudlog.info(f"raylib: {text_str}")
-      elif log_level == rl.TraceLogLevel.LOG_DEBUG:
-        cloudlog.debug(f"raylib: {text_str}")
-      else:
-        cloudlog.error(f"raylib: Unknown level {log_level}: {text_str}")
+      # [op9] raylib invokes this callback from its own C thread; cloudlog's ZMQ swaglog
+      # socket is not thread-safe and raised "Socket operation on non-socket", crashing the
+      # UI at startup. Guard the log so a logging hiccup can never take down the UI.
+      try:
+        if log_level == rl.TraceLogLevel.LOG_ERROR:
+          cloudlog.error(f"raylib: {text_str}")
+        elif log_level == rl.TraceLogLevel.LOG_WARNING:
+          cloudlog.warning(f"raylib: {text_str}")
+        elif log_level == rl.TraceLogLevel.LOG_INFO:
+          cloudlog.info(f"raylib: {text_str}")
+        elif log_level == rl.TraceLogLevel.LOG_DEBUG:
+          cloudlog.debug(f"raylib: {text_str}")
+        else:
+          cloudlog.error(f"raylib: Unknown level {log_level}: {text_str}")
+      except Exception:
+        pass
 
     # ensure we get all the logs forwarded to us
     rl.set_trace_log_level(rl.TraceLogLevel.LOG_DEBUG)

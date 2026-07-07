@@ -4,7 +4,11 @@ import pyray as rl
 
 from msgq.visionipc import VisionIpcClient, VisionStreamType, VisionBuf
 from openpilot.common.swaglog import cloudlog
-from openpilot.system.hardware import TICI
+import os as _os
+from openpilot.system.hardware import TICI as _HW_TICI
+# [op9] force the portable CPU texture-upload path (instead of zero-copy EGL DMA-buf, which
+# can't init under software-GL / X11 Xvfb+VNC) when OP9_UI_CPU_TEX=1.
+TICI = _HW_TICI and not _os.getenv("OP9_UI_CPU_TEX")
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.egl import init_egl, create_egl_image, destroy_egl_image, bind_egl_image_to_texture, EGLImage
 from openpilot.system.ui.widgets import Widget
