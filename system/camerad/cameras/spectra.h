@@ -172,6 +172,12 @@ public:
   CameraConfig cc;
   std::unique_ptr<const SensorInfo> sensor;
 
+  // [op9ae] AE-driven ISP digital gain (x100) applied in the software debayer, mirroring the
+  // stock HAL "ISP Digital Gain" (rises 1.0x -> ~2.0x once analog gain + exposure are maxed and
+  // the image is still dark). Written by the AE loop (camera_qcom2.cc set_camera_exposure),
+  // read by the debayer (processFrame). Default 100 = 1.0x.
+  int isp_dgain = 100;
+
   // YUV image size
   uint32_t stride;
   uint32_t y_height;

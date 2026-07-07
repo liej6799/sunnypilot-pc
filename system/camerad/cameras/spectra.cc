@@ -332,6 +332,7 @@ void SpectraCamera::sensors_start() {
   // Mirror the stock: acquire the cam-actuator subdev, CONFIG_DEV(INIT) with slave
   // info + power-up, then START_DEV. Only the main wide cam (IMX689) needs it.
   if (cc.camera_num == 0) {
+    fprintf(stderr, "[op9af] entering actuator bring-up (cam0)\n");
     int act_fd = -1;
     for (int idx = 0; idx < 4; idx++) {
       int fd = open_v4l_by_name_and_index("cam-actuator-driver", idx);
@@ -339,7 +340,9 @@ void SpectraCamera::sensors_start() {
     }
     if (act_fd < 0) {
       LOGE("actuator: no cam-actuator-driver subdev");
+      fprintf(stderr, "[op9af] no cam-actuator-driver subdev!\n");
     } else {
+      fprintf(stderr, "[op9af] actuator subdev opened fd=%d\n", act_fd);
       auto ah = device_acquire(act_fd, session_handle, nullptr);
       if (!ah) {
         LOGE("actuator: CAM_ACQUIRE_DEV failed");
@@ -373,21 +376,34 @@ void SpectraCamera::sensors_start() {
         apw->power_settings[0].power_seq_type = 4;  // VAF
         apw = power_set_wait(apw, 1);
         abd[1].size = abd[1].length = (uint8_t *)apw - (uint8_t *)aps.get();  // [op9] exact power-buffer size
-        // buf[2]: init settings — stock actuator writes reg 0xe0=0x01 (BYTE addr/data) -> is_settings_valid
-        struct i2c_random_wr_payload act_init[] = {{0xe0, 0x01}};
+        // buf[2]: INIT settings. Stock actuator writes reg 0xe0=0x01 (control/enable, BYTE) then
+        // moves the lens. [op9af] FIXED FOCUS: openpilot uses fixed focus (not tap-to-focus), so
+        // we splice the VCM DAC position into the INIT i2c settings right after the enable. The
+        // DW9800-class VCM takes a 16-bit DAC at reg 0x03 (matches the stock actuator CCI writes
+        // on slave 0xe4: "addr type 1 [BYTE addr] data type 2 [WORD data]"). OP9_FOCUS = raw DAC
+        // code (0 = rest/infinity end, higher = closer). Applying it in the INIT settings buffer is
+        // reliable (a separate MANUAL_MOVE_LENS packet returned rc=-1). Data type is WORD for both
+        // writes; 0x00e0 upper byte is 0 so 0xe0 still programs 0x01 correctly as a 16-bit value.
+        int focus = getenv("OP9_FOCUS") ? atoi(getenv("OP9_FOCUS")) : 0;
+        struct i2c_random_wr_payload act_init[] = {
+          {0x00e0, 0x0001},                        // control/enable (stock is_settings_valid)
+          {0x0003, (uint16_t)(focus & 0xffff)},    // [op9af] DW9800 DAC position (fixed focus)
+        };
         abd[2].size = abd[2].length = sizeof(struct i2c_rdwr_header) + sizeof(act_init);
         abd[2].type = CAM_CMD_BUF_I2C;
         auto airw = m->mem_mgr.alloc<struct cam_cmd_i2c_random_wr>(abd[2].size, (uint32_t *)&abd[2].mem_handle);
-        airw->header.count = 1;
+        airw->header.count = 2;
         airw->header.op_code = 1;
         airw->header.cmd_type = CAMERA_SENSOR_CMD_TYPE_I2C_RNDM_WR;
-        airw->header.data_type = CAMERA_SENSOR_I2C_TYPE_BYTE;
+        airw->header.data_type = CAMERA_SENSOR_I2C_TYPE_WORD;   // [op9af] 16-bit data (DAC needs WORD)
         airw->header.addr_type = CAMERA_SENSOR_I2C_TYPE_BYTE;
         memcpy(airw->random_wr_payload, act_init, sizeof(act_init));
         int arc = device_config(act_fd, session_handle, act_handle, aph);
         LOGE("actuator config rc=%d", arc);
+        fprintf(stderr, "[op9af] actuator config (focus DAC=%d) rc=%d\n", focus, arc);
         arc = device_control(act_fd, CAM_START_DEV, session_handle, act_handle);
         LOGE("actuator start rc=%d", arc);
+        fprintf(stderr, "[op9af] actuator start rc=%d\n", arc);
       }
     }
   }
@@ -2180,14 +2196,12 @@ bool SpectraCamera::processFrame(int buf_idx, uint64_t request_id, uint64_t fram
       const int wbb = getenv("OP9_WB_B") ? atoi(getenv("OP9_WB_B")) : 155;
       const int br  = getenv("OP9_BRIGHT") ? atoi(getenv("OP9_BRIGHT")) : 600;
       const int gm  = getenv("OP9_GAMMA") ? atoi(getenv("OP9_GAMMA")) : 220;
-      // [op9ae] ISP digital gain (x100), WIDE (IMX766) ONLY. The stock HAL applies an extra ISP
-      // digital gain (1.0x in bright up to ~2.0x in the dark) ON TOP of analog gain + exposure --
-      // captured from CamX "ISP Digital Gain". Our wide is FLL-capped (can't reach stock's 6622-line
-      // exposure) so we lean on this to recover the missing light. Applied to the black-level-
-      // subtracted raw before the WB/gamma LUT. WIDE default 200 (2.0x); the ROAD (imx689, already
-      // correctly exposed) gets 1.0x. OP9_ISP_DGAIN overrides both.
-      const bool is_uw = (sensor->frame_width >= 4096);
-      const int idg = getenv("OP9_ISP_DGAIN") ? atoi(getenv("OP9_ISP_DGAIN")) : (is_uw ? 200 : 100);
+      // [op9ae] ISP digital gain (x100) applied to the black-level-subtracted raw before the WB/
+      // gamma LUT, mirroring the stock HAL "ISP Digital Gain" (1.0x in bright, rising to ~2.0x once
+      // analog gain + exposure are maxed and the image is still dark -- captured for BOTH the main
+      // IMX689 (up to 1.85x) and the wide IMX766). AE-driven: the value is set per-frame by the AE
+      // loop in isp_dgain (SpectraCamera). OP9_ISP_DGAIN forces a fixed value (debug/override).
+      const int idg = getenv("OP9_ISP_DGAIN") ? atoi(getenv("OP9_ISP_DGAIN")) : isp_dgain;
       // 10-bit(after BL) -> 8-bit gamma+brightness LUT (rebuilt if env changes)
       static uint8_t lut[1024]; static int l_br = -1, l_gm = -1;
       if (l_br != br || l_gm != gm) {

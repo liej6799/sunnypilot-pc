@@ -340,6 +340,30 @@ void CameraState::set_camera_exposure(float grey_frac) {
   float gain = analog_gain_frac * get_gain_factor();
   cur_ev[camera.buf.cur_frame_data.frame_id % 3] = exposure_time * gain;
 
+  // [op9ae] AE-driven ISP digital gain, mirroring the stock HAL "ISP Digital Gain" (rises 1.0x ->
+  // ~1.85-2.0x once analog gain + exposure are maxed and the image is still below target; captured
+  // on both the main IMX689 and the wide IMX766). The software debayer reads camera.isp_dgain.
+  // Ramp slowly (avoid flicker): when railed at max gain & near-max exposure and still short of
+  // target, step up toward the cap; otherwise decay back to 1.0x. OP9_ISP_DGAIN forces a fixed value.
+  {
+    static const int idg_fixed = getenv("OP9_ISP_DGAIN") ? atoi(getenv("OP9_ISP_DGAIN")) : 0;
+    if (idg_fixed > 0) {
+      camera.isp_dgain = idg_fixed;
+    } else {
+      const int IDG_MAX = 400;   // 4.0x cap (stock ISP digital gain reaches ~4.0x in very dark scenes)
+      const int IDG_MIN = 100;   // 1.0x
+      const bool gain_railed = (gain_idx >= sensor->analog_gain_max_idx);
+      const bool exp_railed  = (exposure_time >= sensor->exposure_time_max - 4);
+      const bool too_dark    = (grey_frac < target_grey * 0.9f);
+      const bool too_bright  = (grey_frac > target_grey * 1.1f);
+      if (gain_railed && exp_railed && too_dark) {
+        camera.isp_dgain = std::min(IDG_MAX, camera.isp_dgain + 2);   // ramp up
+      } else if (too_bright || !gain_railed) {
+        camera.isp_dgain = std::max(IDG_MIN, camera.isp_dgain - 2);   // decay down
+      }
+    }
+  }
+
   // LOGE("ae - camera %d, cur_t %.5f, sof %.5f, dt %.5f", camera.cc.camera_num, 1e-9 * nanos_since_boot(), 1e-9 * camera.buf.cur_frame_data.timestamp_sof, 1e-9 * (nanos_since_boot() - camera.buf.cur_frame_data.timestamp_sof));
 
   auto exp_reg_array = sensor->getExposureRegisters(exposure_time, new_exp_g, dc_gain_enabled);
