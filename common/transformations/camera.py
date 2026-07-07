@@ -55,12 +55,13 @@ _neo_config = DeviceCameraConfig(CameraConfig(1164, 874, 910.0), CameraConfig(81
 # [op9] OnePlus 9 (lemonade). camerad publishes FULL-res NV12 (no downscale); modeld's warp
 # crops/resizes each frame to the model input (256x128) using these intrinsics, so they must
 # match the actual sensor buffer geometry (else the warp samples the wrong region).
-#   road  = IMX766 4096x3072, focal 8.0mm  / 1.6um binned px -> fl_pix = 8.0/0.0016   = 5000
-#   wide  = IMX689 4000x3000, focal 1.71mm / 1.2um px        -> fl_pix = 1.71/0.0012  = 1425
+# SENSOR<->STREAM MAPPING (corrected 2026-07, matches system/camerad/cameras/hw.h):
+#   road (VISION_STREAM_ROAD, primary)   = IMX689 MAIN       4000x3000, focal 1.71mm / 1.2um px -> fl_pix = 1.71/0.0012 = 1425
+#   wide (VISION_STREAM_WIDE_ROAD, aux)  = IMX766 ULTRA-WIDE 4096x3072, focal 8.0mm  / 1.6um px -> fl_pix = 8.0/0.0016  = 5000
 # focal lengths are first-order (from hw.h focal_len + sensor pixel_size); refine with a real
 # calibration capture (get_view_frame_from_road_frame residuals).
-_op9_road = CameraConfig(4096, 3072, 5000.0)
-_op9_wide = CameraConfig(4000, 3000, 1425.0)
+_op9_road = CameraConfig(4000, 3000, 1425.0)   # IMX689 main
+_op9_wide = CameraConfig(4096, 3072, 5000.0)   # IMX766 ultra-wide
 _op9_config = DeviceCameraConfig(_op9_road, _op9_wide, _op9_wide)
 
 DEVICE_CAMERAS = {

@@ -77,8 +77,12 @@ class ModelState(ModelStateBase):
   inputs: dict[str, np.ndarray]
   prev_desire: np.ndarray
 
-  def __init__(self, cam_w: int, cam_h: int):
+  def __init__(self, cam_w: int, cam_h: int, extra_w: int | None = None, extra_h: int | None = None):
+    # [op9] extra_w/extra_h: geometry of the extra (wide) camera when it differs from the main.
+    # OP9: road/main = IMX689 4000x3000, wide = IMX766 ultra-wide 4096x3072. Defaults to main.
     ModelStateBase.__init__(self)
+    self._extra_w = extra_w if extra_w is not None else cam_w
+    self._extra_h = extra_h if extra_h is not None else cam_h
 
     env_pkl = os.environ.get('COMBINED_MODEL_PKL')
     if env_pkl and os.path.exists(env_pkl):
@@ -155,14 +159,36 @@ class ModelState(ModelStateBase):
     self.prev_desire = np.zeros(self.constants.DESIRE_LEN, dtype=np.float32)
     self.full_frames: dict = {}
     self._blob_cache: dict = {}
-    nv12_info = get_nv12_info(cam_w, cam_h)
-    self.frame_buf_params = dict.fromkeys(self._vision_input_names, nv12_info)
+    # [op9] per-camera NV12 geometry: 'img'/'frame' = main cam, 'big_img'/'big_frame' = extra/wide cam.
+    # These can differ on the OP9 (main IMX689 4000x3000 vs wide IMX766 4096x3072), so size each
+    # vision input's buffer by ITS OWN camera geometry (was: single main-geometry nv12_info for all,
+    # which mis-sized the wide big_img blob when the two resolutions differ).
+    main_nv12 = get_nv12_info(cam_w, cam_h)
+    extra_nv12 = get_nv12_info(self._extra_w, self._extra_h)
+    self.frame_buf_params = {k: (extra_nv12 if 'big' in k else main_nv12) for k in self._vision_input_names}
 
+    # [op9] warp key selection. Preferred: the asymmetric (main_w, main_h, wide_w, wide_h)
+    # 4-tuple that warps each camera with its OWN NV12 geometry (OP9: main IMX689 4000x3000
+    # + wide IMX766 4096x3072; built by selfdrive/modeld/compile_modeld.py --camera-resolution-pairs).
+    # Fallback: the symmetric (main_w, main_h) warp -- a compiled warp JIT reads the frame buffers
+    # as raw bytes, so it still runs when the wide buffer differs in size (it just samples the
+    # main-sized region of the wide plane). Keeps compatibility with symmetric-only pkls.
+    asym_key = (cam_w, cam_h, self._extra_w, self._extra_h)
+    sym_key = (cam_w, cam_h)
+    if asym_key in jits:
+      warp_key = asym_key
+    elif sym_key in jits:
+      warp_key = sym_key
+      if asym_key[:2] != asym_key[2:]:
+        cloudlog.warning(f"[op9] no asymmetric warp {asym_key}; falling back to symmetric {sym_key} "
+                         f"(wide buffer read at main geometry). Compile --camera-resolution-pairs for exactness.")
+    else:
+      raise AssertionError(f"no warp JIT for {asym_key} or {sym_key}; compiled: {[k for k in jits if isinstance(k, tuple)]}")
     # [op9] support legacy two-stage pkls: per-res entry is the vision-only warp_enqueue
     # TinyJit (NOT a dict), and run_policy is top-level, consuming the warped img/big_img
     # + policy queues + action_t. The post-tinygrad-bump format wraps both in a dict and
     # merges warp+policy into one run_policy(frame, big_frame, **queues) call.
-    _res = jits[(cam_w, cam_h)]
+    _res = jits[warp_key]
     self._two_stage = not isinstance(_res, dict)
     if self._two_stage:
       self._warp_enqueue, self._run_policy = _res, jits['run_policy']
@@ -170,15 +196,20 @@ class ModelState(ModelStateBase):
       self.input_queues['action_t'] = Tensor(self.numpy_inputs['action_t'], device='NPY').realize()
     else:
       self._run_policy, self._warp_enqueue = _res['run_policy'], _res['warp_enqueue']
+    # [op9] warm-up frames sized per-camera: main uses the road buf yuv_size, big_frame the wide's
+    # (they differ on OP9). Was a single road-sized zero frame for both -> shape mismatch on the
+    # asymmetric warp JIT's big_frame input.
     road_name = next(k for k in self._vision_input_names if 'big' not in k)
-    yuv_size = self.frame_buf_params[road_name][3]
-    _zero_frame = lambda: Tensor(np.zeros(yuv_size, dtype=np.uint8), device=self.DEV).contiguous().realize()
+    big_name = next(k for k in self._vision_input_names if 'big' in k)
+    _zero = lambda sz: Tensor(np.zeros(sz, dtype=np.uint8), device=self.DEV).contiguous().realize()
+    _zero_main = lambda: _zero(self.frame_buf_params[road_name][3])
+    _zero_big = lambda: _zero(self.frame_buf_params[big_name][3])
     if self._two_stage:
       self._warp_enqueue(img_q=self.input_queues['img_q'], big_img_q=self.input_queues['big_img_q'],
                          tfm=self.input_queues['tfm'], big_tfm=self.input_queues['big_tfm'],
-                         frame=_zero_frame(), big_frame=_zero_frame())
+                         frame=_zero_main(), big_frame=_zero_big())
     else:
-      self._warp_enqueue(**self.input_queues, frame=_zero_frame(), big_frame=_zero_frame())
+      self._warp_enqueue(**self.input_queues, frame=_zero_main(), big_frame=_zero_big())
 
 
   @property
@@ -312,7 +343,12 @@ def main(demo=False):
     cloudlog.warning(f"connected extra cam with buffer size: {vipc_client_extra.buffer_len} ({vipc_client_extra.width} x {vipc_client_extra.height})")
 
   cloudlog.warning("loading model")
-  model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height)
+  # [op9] pass the extra (wide) camera's own geometry when it differs from the main, so the
+  # model sizes the wide buffer + picks the asymmetric warp JIT correctly (OP9: main IMX689
+  # 4000x3000, wide IMX766 4096x3072).
+  model = ModelState(cam_w=vipc_client_main.width, cam_h=vipc_client_main.height,
+                     extra_w=vipc_client_extra.width if use_extra_client else None,
+                     extra_h=vipc_client_extra.height if use_extra_client else None)
   cloudlog.warning("models loaded, modeld starting")
 
   # messaging
