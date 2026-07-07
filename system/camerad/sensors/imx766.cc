@@ -19,9 +19,10 @@ const float sensor_analog_gains_IMX766[] = {
     5.75, 6.0, 6.25, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0,
     10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5, 15.0, 15.5};
 
-// [op9ae] Sony analog gain register code from linear gain: gain = 1024/(1024-code).
-// Ceiling 960 (16x) is the highest code proven on the OP9 sensors (OP9_GAIN=960).
-inline uint16_t sony_gain_code(float gain) {
+// [op9ae] Standard Sony analog gain code (gain = 1024/(1024-code)). UNUSED on the IMX766:
+// this sensor uses the custom 0x0B8E gain register (gain*64) instead (see getExposureRegisters).
+// Kept for reference / other Sony modes. [[maybe_unused]] to satisfy -Werror=unused-function.
+[[maybe_unused]] inline uint16_t sony_gain_code(float gain) {
   int code = (int)lroundf(1024.0f - 1024.0f / std::max(gain, 1.0f));
   return (uint16_t)std::clamp(code, 0, 960);
 }
@@ -158,21 +159,38 @@ IMX766::IMX766() {
 }
 
 std::vector<i2c_random_wr_payload> IMX766::getExposureRegisters(int exposure_time, int new_exp_g, bool dc_gain_enabled) const {
-  // Sony IMX coarse integration time @ 0x0202/0x0203, analog gain @ 0x0204/0x0205.
-  // [op9ae] new_exp_g is a gain INDEX into sensor_analog_gains (upstream semantic).
-  // The register wants the Sony gain CODE (gain = 1024/(1024-code)); writing the raw
-  // index programmed ~1.0x for every index, so AE could never brighten the image.
-  // Bracket with grouped-parameter-hold (0x0104) so integ+gain latch on the same frame.
+  // [op9ae] IMX766 uses a CUSTOM (OPLUS) exposure/gain interface, NOT the standard Sony
+  // 0x0204 analog-gain register. Decoded from the stock CamX HAL's live CCI writes (sid
+  // 0x1a) while sweeping AE (see camera/../stock_ae_reference.md). Writing 0x0204 (as we
+  // did before) had ZERO effect -> the ultra-wide stayed dark. The stock per-frame group is:
+  //   0x0104=1 (GPH on)
+  //   0x3128=0            OPLUS commit/latch enable (REQUIRED; without it the group is ignored)
+  //   0x0340/0341 = FLL   frame length, extended TOGETHER with exposure (else integ is clamped)
+  //   0x0202/0203 = EXP   coarse integration time
+  //   0x020E/020F = 0x0100 digital gain = 1.0x (analog-only, like stock)
+  //   0x0104=0 (GPH off)
+  // and the analog gain in a separate write to the CUSTOM register 0x0B8E:
+  //   0x0B8E (16-bit) = round(gain * 64)   VERIFIED: 0x01D1=465 -> 7.27x; 0x02E6=742 -> 11.59x
+  // (0x0100 = 4.0x, 0x0040 = 1.0x). Kept inside the same GPH bracket so integ+gain latch together.
   uint32_t e = (uint32_t)std::clamp(exposure_time, 2, exposure_time_max);
   int g = std::clamp(new_exp_g, analog_gain_min_idx, analog_gain_max_idx);
-  uint16_t code = sony_gain_code(sensor_analog_gains[g]);
+  // FLL must cover the integration time (+a few guard lines) but stay >= the mode minimum;
+  // extending FLL with exposure is what lets the long integration actually take effect.
+  uint32_t fll = (uint32_t)std::clamp((int)e + 8, (int)frame_length_lines,
+                                      (int)frame_length_lines + 1600);
+  uint16_t gcode = (uint16_t)std::clamp((int)lroundf(sensor_analog_gains[g] * 64.0f), 64, 4095);  // [op9] gain*64
   return {
-    {0x0104, 1},
-    {0x0202, (uint16_t)((e >> 8) & 0xff)},
-    {0x0203, (uint16_t)(e & 0xff)},
-    {0x0204, (uint16_t)((code >> 8) & 0xff)},
-    {0x0205, (uint16_t)(code & 0xff)},
-    {0x0104, 0},
+    {0x0104, 0x01},                              // GPH on
+    {0x3128, 0x00},                              // [op9] OPLUS commit enable (stock always writes this)
+    {0x0340, (uint16_t)((fll >> 8) & 0xff)},     // FLL hi
+    {0x0341, (uint16_t)(fll & 0xff)},            // FLL lo
+    {0x0202, (uint16_t)((e >> 8) & 0xff)},       // EXP hi
+    {0x0203, (uint16_t)(e & 0xff)},              // EXP lo
+    {0x020E, 0x01},                              // digital gain hi = 1.0x
+    {0x020F, 0x00},                              // digital gain lo
+    {0x0B8E, (uint16_t)((gcode >> 8) & 0xff)},   // [op9] CUSTOM analog gain hi (gain*64)
+    {0x0B8F, (uint16_t)(gcode & 0xff)},          // [op9] CUSTOM analog gain lo
+    {0x0104, 0x00},                              // GPH off
   };
 }
 
