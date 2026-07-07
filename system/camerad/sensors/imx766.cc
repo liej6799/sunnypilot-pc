@@ -120,10 +120,11 @@ IMX766::IMX766() {
   dc_gain_on_grey = 0.9;
   dc_gain_off_grey = 1.0;
   exposure_time_min = 2;
-  // [op9ae] max coarse integration lines (~full frame of the 3072-row mode at native
-  // rate; the imx766 clamps integration at its FLL rather than auto-extending).
-  // OP9_AE_MAXT overrides for low-light testing.
-  exposure_time_max = getenv("OP9_AE_MAXT") ? atoi(getenv("OP9_AE_MAXT")) : 3000;
+  // [op9ae] max coarse integration lines. Stock HAL runs this sensor at 4966 lines (=50 ms)
+  // in low light before ramping analog gain (captured 2026-07 via CamX PublishPerFrameSensorMetaData),
+  // so the old 3000 cap starved the ultra-wide of exposure and it came out dark. Raise to 5000 to
+  // match stock's full ~50 ms integration window. OP9_AE_MAXT overrides.
+  exposure_time_max = getenv("OP9_AE_MAXT") ? atoi(getenv("OP9_AE_MAXT")) : 5000;
   analog_gain_min_idx = 0x0;
   analog_gain_rec_idx = 0x0;
   analog_gain_max_idx = 54;  // [op9ae] 15.5x (code 958); was 0x28=8.5x

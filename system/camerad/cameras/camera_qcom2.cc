@@ -28,9 +28,21 @@ static const int AE_WARMUP_G = 0;    // 1.0x
 // cur_ev * ev_scale magnitudes calibrated to comma's OX03C10/OS04C10 — not these Sony
 // sensors, so it lands arbitrarily dark (~0.13) here. A fixed target is the reliable
 // lever (ev_scale cancels out of desired_ev, so it only fed the dynamic curve anyway).
-// Tuned on the OP9 for a bright, low-noise indoor image. OP9_AE_TARGET overrides;
-// OP9_AE_TARGET=0 restores the dynamic curve.
-static const float AE_DEFAULT_TARGET = 0.30f;
+//
+// PER-CAMERA targets (2026-07 tune vs stock HAL ground truth, indoor):
+//   stock IMX689 main -> 50ms + ~4.0x gain (ISO ~400);  IMX766 ultra-wide -> 50ms + ~10x (ISO ~1000).
+// A single shared target made the road (IMX689) too bright and the wide (IMX766) too dark,
+// because the two sensors differ ~2.5x in sensitivity and share the grey/EV loop.
+// ROAD target 0.11: VERIFIED against stock — locking IMX689 to the exact stock registers
+// (4642 lines / 4.0x, OP9_FIX_ROAD_T/G) produced a correctly-exposed image whose measured
+// grey is ~0.109; setting the AE target to 0.11 makes the closed loop converge to the same
+// ~4.25-4.5x gain / 50 ms, matching stock (was 0.24 -> AE over-drove to ~6x -> too bright).
+// Indexed by camera_num: 0 = IMX689 ROAD/main, 1 = IMX766 WIDE/ultra-wide, 2 = driver.
+// Per-camera override: OP9_AE_TARGET_ROAD / OP9_AE_TARGET_WIDE; global OP9_AE_TARGET still
+// wins if set (0 = restore dynamic curve).
+// NOTE: the WIDE/IMX766 value is not yet meaningful — that sensor's gain/exposure writes
+// don't take effect (custom OPLUS register interface, separate bringup fix pending).
+static const float AE_DEFAULT_TARGETS[3] = {0.11f, 0.30f, 0.30f};  // {road/689, wide/766, driver}
 
 // [op9sync] SOF phase-lock: the two OP9 sensors free-run with different mode frame
 // periods (road 67.140ms vs wide 67.336ms -> 196us/frame relative drift), so their SOF
@@ -166,6 +178,31 @@ void CameraState::update_exposure_score(float desired_ev, int exp_t, int exp_g_i
 
 void CameraState::set_camera_exposure(float grey_frac) {
   if (!camera.enabled) return;
+
+  // [op9ae DIAG] Fixed-exposure lock to reproduce the STOCK HAL register values and isolate
+  // sensor-side vs ISP-side brightness issues (bringup). Per-stream: OP9_FIX_ROAD_T/OP9_FIX_ROAD_G
+  // set the ROAD (IMX689) linecount + analog-gain INDEX; OP9_FIX_WIDE_T/OP9_FIX_WIDE_G the WIDE
+  // (IMX766). When set, AE is bypassed and the exact fixed values are programmed every frame.
+  // Stock ground truth (indoor): ROAD 4642 lines / 4.0x (idx 26); WIDE 4966 lines / 10.0x (idx 43).
+  {
+    const char *fT = nullptr, *fG = nullptr;
+    if (camera.cc.stream_type == VISION_STREAM_ROAD)      { fT = getenv("OP9_FIX_ROAD_T"); fG = getenv("OP9_FIX_ROAD_G"); }
+    else if (camera.cc.stream_type == VISION_STREAM_WIDE_ROAD) { fT = getenv("OP9_FIX_WIDE_T"); fG = getenv("OP9_FIX_WIDE_G"); }
+    if (fT && fG) {
+      exposure_time = std::clamp(atoi(fT), camera.sensor->exposure_time_min, camera.sensor->exposure_time_max);
+      gain_idx = std::clamp(atoi(fG), camera.sensor->analog_gain_min_idx, camera.sensor->analog_gain_max_idx);
+      analog_gain_frac = camera.sensor->sensor_analog_gains[gain_idx];
+      dc_gain_enabled = false;
+      cur_ev[camera.buf.cur_frame_data.frame_id % 3] = exposure_time * analog_gain_frac * get_gain_factor();
+      auto fix = camera.sensor->getExposureRegisters(exposure_time, gain_idx, false);
+      camera.sensors_i2c(fix.data(), fix.size(), CAM_SENSOR_PACKET_OPCODE_SENSOR_CONFIG, camera.sensor->data_word);
+      static const int fix_log = getenv("OP9_AE_LOG") ? std::max(1, atoi(getenv("OP9_AE_LOG"))) : 0;
+      if (fix_log && (camera.buf.cur_frame_data.frame_id % fix_log == 0))
+        fprintf(stderr, "[op9fix] cam%d f%u FIXED t=%d g=%d(%.2fx) grey=%.4f\n",
+                camera.cc.camera_num, camera.buf.cur_frame_data.frame_id, exposure_time, gain_idx, analog_gain_frac, grey_frac);
+      return;
+    }
+  }
   // [op9sync] track the wide cam's SOF + frame period (the sync reference)
   if (camera.cc.stream_type == VISION_STREAM_WIDE_ROAD) {
     const uint64_t sof = camera.buf.cur_frame_data.timestamp_sof;
@@ -221,8 +258,15 @@ void CameraState::set_camera_exposure(float grey_frac) {
 
   // Scale target grey between min and 0.4 depending on lighting conditions
   float new_target_grey = std::clamp(0.4 - 0.3 * log2(1.0 + sensor->target_grey_factor*cur_ev_) / log2(6000.0), target_grey_minimums[camera.cc.camera_num], 0.4);
-  // [op9ae] fixed brightness target (see AE_DEFAULT_TARGET). >0 -> fixed; =0 -> dynamic curve.
-  static const float ae_target_env = getenv("OP9_AE_TARGET") ? (float)atof(getenv("OP9_AE_TARGET")) : AE_DEFAULT_TARGET;
+  // [op9ae] fixed brightness target (see AE_DEFAULT_TARGETS). >0 -> fixed; =0 -> dynamic curve.
+  // Priority: global OP9_AE_TARGET > per-camera OP9_AE_TARGET_ROAD/WIDE > compiled default.
+  static const float ae_target_global = getenv("OP9_AE_TARGET") ? (float)atof(getenv("OP9_AE_TARGET")) : -1.0f;
+  static const float ae_target_road = getenv("OP9_AE_TARGET_ROAD") ? (float)atof(getenv("OP9_AE_TARGET_ROAD")) : -1.0f;
+  static const float ae_target_wide = getenv("OP9_AE_TARGET_WIDE") ? (float)atof(getenv("OP9_AE_TARGET_WIDE")) : -1.0f;
+  float ae_target_env = AE_DEFAULT_TARGETS[std::min(camera.cc.camera_num, 2)];
+  if (ae_target_global >= 0.0f) ae_target_env = ae_target_global;                                       // global (incl 0 = dynamic)
+  else if (camera.cc.stream_type == VISION_STREAM_ROAD && ae_target_road >= 0.0f) ae_target_env = ae_target_road;
+  else if (camera.cc.stream_type == VISION_STREAM_WIDE_ROAD && ae_target_wide >= 0.0f) ae_target_env = ae_target_wide;
   if (ae_target_env > 0.0f) new_target_grey = ae_target_env;
   float target_grey = (1.0 - k_grey) * target_grey_fraction + k_grey * new_target_grey;
 

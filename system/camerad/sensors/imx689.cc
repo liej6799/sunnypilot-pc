@@ -176,10 +176,12 @@ IMX689::IMX689() {
   dc_gain_on_grey = 0.9;
   dc_gain_off_grey = 1.0;
   exposure_time_min = 2;
-  // [op9ae] max coarse integration lines. ~3000 = the 3000-row binned mode's full frame at
-  // native rate; beyond FLL the sensor auto-extends the frame (fps drops, more light).
-  // OP9_AE_MAXT trades fps for low-light exposure (8000 proven stable through the chain).
-  exposure_time_max = getenv("OP9_AE_MAXT") ? atoi(getenv("OP9_AE_MAXT")) : 3000;
+  // [op9ae] max coarse integration lines. Stock HAL runs this main sensor at 4642 lines (=50 ms)
+  // in low light with only ~4x analog gain (captured 2026-07 via CamX PublishPerFrameSensorMetaData).
+  // Beyond FLL the sensor auto-extends the frame (fps drops, more light). Raise the cap to 5000 to
+  // match stock's ~50 ms window; the lower AE target (see AE_DEFAULT_TARGETS) keeps it from
+  // over-exposing. OP9_AE_MAXT overrides.
+  exposure_time_max = getenv("OP9_AE_MAXT") ? atoi(getenv("OP9_AE_MAXT")) : 5000;
   analog_gain_min_idx = 0x0;
   analog_gain_rec_idx = 0x0;
   analog_gain_max_idx = 54;  // [op9ae] 15.5x (code 958); was 0x28=8.5x
