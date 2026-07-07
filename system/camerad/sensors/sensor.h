@@ -21,7 +21,7 @@
 #include "system/camerad/sensors/ox03c10_registers.h"
 #include "system/camerad/sensors/os04c10_registers.h"
 
-#define ANALOG_GAIN_MAX_CNT 55
+#define ANALOG_GAIN_MAX_CNT 67  // [op9ae] extended for IMX766 custom-gain range (was 55)
 
 class SensorInfo {
 public:

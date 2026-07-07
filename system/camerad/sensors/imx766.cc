@@ -17,7 +17,11 @@ const float sensor_analog_gains_IMX766[] = {
     1.8125, 1.9375, 2.0, 2.125, 2.25, 2.375, 2.5, 2.625, 2.75, 2.875, 3.0,
     3.125, 3.375, 3.625, 3.875, 4.0, 4.25, 4.5, 4.75, 5.0, 5.25, 5.5,
     5.75, 6.0, 6.25, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 9.5, 10.0,
-    10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5, 15.0, 15.5};
+    10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5, 15.0, 15.5,
+    // [op9ae] extended range: the IMX766 FLL is pinned at native timing so exposure caps at ~33ms
+    // (vs stock's 50ms); the custom 0x0B8E gain reg supports up to 64x (gain*64 <= 4095), so allow
+    // more analog gain to reach stock-equivalent brightness. Stock swept this sensor to ~64x.
+    16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0};
 
 // [op9ae] Standard Sony analog gain code (gain = 1024/(1024-code)). UNUSED on the IMX766:
 // this sensor uses the custom 0x0B8E gain register (gain*64) instead (see getExposureRegisters).
@@ -121,14 +125,17 @@ IMX766::IMX766() {
   dc_gain_on_grey = 0.9;
   dc_gain_off_grey = 1.0;
   exposure_time_min = 2;
-  // [op9ae] max coarse integration lines. Stock HAL runs this sensor at 4966 lines (=50 ms)
-  // in low light before ramping analog gain (captured 2026-07 via CamX PublishPerFrameSensorMetaData),
-  // so the old 3000 cap starved the ultra-wide of exposure and it came out dark. Raise to 5000 to
-  // match stock's full ~50 ms integration window. OP9_AE_MAXT overrides.
-  exposure_time_max = getenv("OP9_AE_MAXT") ? atoi(getenv("OP9_AE_MAXT")) : 5000;
+  // [op9ae] max coarse integration lines. The IMX766 FLL is PINNED at its native 3310 (the BPS
+  // replay blobs + CPAS/NOC bandwidth are captured at that exact timing; changing FLL -- at init
+  // OR per-frame -- hard-crashes the SoC within ~3min, see the [op9sync]/ctor notes and the
+  // 2026-07 reboot). So exposure can't exceed ~FLL: cap just below 3310 (leave a few guard lines
+  // for the coarse-integ margin). Stock reaches 50ms because its HAL safely extends FLL every
+  // frame; we can't, so we compensate with the custom 0x0B8E analog gain instead (getExposureRegisters).
+  // OP9_AE_MAXT overrides (do NOT exceed 3300 unless you also lift the FLL, which crashes).
+  exposure_time_max = getenv("OP9_AE_MAXT") ? atoi(getenv("OP9_AE_MAXT")) : 3300;
   analog_gain_min_idx = 0x0;
   analog_gain_rec_idx = 0x0;
-  analog_gain_max_idx = 54;  // [op9ae] 15.5x (code 958); was 0x28=8.5x
+  analog_gain_max_idx = 66;  // [op9ae] 32.0x via custom 0x0B8E (compensates the FLL-capped ~33ms exposure)
   analog_gain_cost_delta = -1;
   analog_gain_cost_low = 0.4;
   analog_gain_cost_high = 6.4;
@@ -159,31 +166,23 @@ IMX766::IMX766() {
 }
 
 std::vector<i2c_random_wr_payload> IMX766::getExposureRegisters(int exposure_time, int new_exp_g, bool dc_gain_enabled) const {
-  // [op9ae] IMX766 uses a CUSTOM (OPLUS) exposure/gain interface, NOT the standard Sony
-  // 0x0204 analog-gain register. Decoded from the stock CamX HAL's live CCI writes (sid
-  // 0x1a) while sweeping AE (see camera/../stock_ae_reference.md). Writing 0x0204 (as we
-  // did before) had ZERO effect -> the ultra-wide stayed dark. The stock per-frame group is:
-  //   0x0104=1 (GPH on)
-  //   0x3128=0            OPLUS commit/latch enable (REQUIRED; without it the group is ignored)
-  //   0x0340/0341 = FLL   frame length, extended TOGETHER with exposure (else integ is clamped)
-  //   0x0202/0203 = EXP   coarse integration time
-  //   0x020E/020F = 0x0100 digital gain = 1.0x (analog-only, like stock)
-  //   0x0104=0 (GPH off)
-  // and the analog gain in a separate write to the CUSTOM register 0x0B8E:
+  // [op9ae] IMX766 uses a CUSTOM (OPLUS) analog-gain register 0x0B8E (NOT the standard Sony
+  // 0x0204). Decoded from the stock CamX HAL's live CCI writes (sid 0x1a) while sweeping AE
+  // (see stock_ae_reference.md). Writing 0x0204 had ZERO effect -> the ultra-wide stayed dark.
   //   0x0B8E (16-bit) = round(gain * 64)   VERIFIED: 0x01D1=465 -> 7.27x; 0x02E6=742 -> 11.59x
-  // (0x0100 = 4.0x, 0x0040 = 1.0x). Kept inside the same GPH bracket so integ+gain latch together.
+  //   0x0202/0203 = EXP (coarse integration time), 0x020E/020F = 0x0100 digital gain (1.0x).
+  //
+  // *** DO NOT write FLL (0x0340) or 0x3128 per-frame. *** The stock HAL co-writes FLL every
+  // frame, but on our free-running (non-HAL) path a per-frame FLL/0x3128 change hard-crashes
+  // the SoC (silent NOC/watchdog reboot within a few minutes -- reproduced 2026-07, also see
+  // the [op9sync] notes). FLL is instead pinned ONCE at init (frame_length_lines, see the ctor
+  // OP9_ROAD_FLL / mode-init table); exposure is clamped below it here. That fixes the 50 ms
+  // integration window without touching FLL mid-stream.
   uint32_t e = (uint32_t)std::clamp(exposure_time, 2, exposure_time_max);
   int g = std::clamp(new_exp_g, analog_gain_min_idx, analog_gain_max_idx);
-  // FLL must cover the integration time (+a few guard lines) but stay >= the mode minimum;
-  // extending FLL with exposure is what lets the long integration actually take effect.
-  uint32_t fll = (uint32_t)std::clamp((int)e + 8, (int)frame_length_lines,
-                                      (int)frame_length_lines + 1600);
   uint16_t gcode = (uint16_t)std::clamp((int)lroundf(sensor_analog_gains[g] * 64.0f), 64, 4095);  // [op9] gain*64
   return {
     {0x0104, 0x01},                              // GPH on
-    {0x3128, 0x00},                              // [op9] OPLUS commit enable (stock always writes this)
-    {0x0340, (uint16_t)((fll >> 8) & 0xff)},     // FLL hi
-    {0x0341, (uint16_t)(fll & 0xff)},            // FLL lo
     {0x0202, (uint16_t)((e >> 8) & 0xff)},       // EXP hi
     {0x0203, (uint16_t)(e & 0xff)},              // EXP lo
     {0x020E, 0x01},                              // digital gain hi = 1.0x

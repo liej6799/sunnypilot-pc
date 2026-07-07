@@ -40,9 +40,12 @@ static const int AE_WARMUP_G = 0;    // 1.0x
 // Indexed by camera_num: 0 = IMX689 ROAD/main, 1 = IMX766 WIDE/ultra-wide, 2 = driver.
 // Per-camera override: OP9_AE_TARGET_ROAD / OP9_AE_TARGET_WIDE; global OP9_AE_TARGET still
 // wins if set (0 = restore dynamic curve).
-// NOTE: the WIDE/IMX766 value is not yet meaningful — that sensor's gain/exposure writes
-// don't take effect (custom OPLUS register interface, separate bringup fix pending).
-static const float AE_DEFAULT_TARGETS[3] = {0.11f, 0.30f, 0.30f};  // {road/689, wide/766, driver}
+// WIDE target 0.08: the IMX766 now responds to gain via the custom 0x0B8E register, but its
+// FLL is pinned at native timing (can't extend past ~33ms without crashing the SoC), so it's
+// exposure-limited and leans on analog gain. Locking it to stock's registers (4966/10x) measured
+// grey ~0.070 for a correct exposure, so target ~0.08 (a touch above to keep gain climbing in the
+// dark). Overridable via OP9_AE_TARGET_WIDE.
+static const float AE_DEFAULT_TARGETS[3] = {0.11f, 0.08f, 0.30f};  // {road/689, wide/766, driver}
 
 // [op9sync] SOF phase-lock: the two OP9 sensors free-run with different mode frame
 // periods (road 67.140ms vs wide 67.336ms -> 196us/frame relative drift), so their SOF
