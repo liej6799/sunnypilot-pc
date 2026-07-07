@@ -2180,6 +2180,14 @@ bool SpectraCamera::processFrame(int buf_idx, uint64_t request_id, uint64_t fram
       const int wbb = getenv("OP9_WB_B") ? atoi(getenv("OP9_WB_B")) : 155;
       const int br  = getenv("OP9_BRIGHT") ? atoi(getenv("OP9_BRIGHT")) : 600;
       const int gm  = getenv("OP9_GAMMA") ? atoi(getenv("OP9_GAMMA")) : 220;
+      // [op9ae] ISP digital gain (x100), WIDE (IMX766) ONLY. The stock HAL applies an extra ISP
+      // digital gain (1.0x in bright up to ~2.0x in the dark) ON TOP of analog gain + exposure --
+      // captured from CamX "ISP Digital Gain". Our wide is FLL-capped (can't reach stock's 6622-line
+      // exposure) so we lean on this to recover the missing light. Applied to the black-level-
+      // subtracted raw before the WB/gamma LUT. WIDE default 200 (2.0x); the ROAD (imx689, already
+      // correctly exposed) gets 1.0x. OP9_ISP_DGAIN overrides both.
+      const bool is_uw = (sensor->frame_width >= 4096);
+      const int idg = getenv("OP9_ISP_DGAIN") ? atoi(getenv("OP9_ISP_DGAIN")) : (is_uw ? 200 : 100);
       // 10-bit(after BL) -> 8-bit gamma+brightness LUT (rebuilt if env changes)
       static uint8_t lut[1024]; static int l_br = -1, l_gm = -1;
       if (l_br != br || l_gm != gm) {
@@ -2202,10 +2210,10 @@ bool SpectraCamera::processFrame(int buf_idx, uint64_t request_id, uint64_t fram
         uint8_t *y1 = y0 + st;
         uint8_t *uv = UVp + (size_t)by * st;
         for (int bx = 0; bx < bw; bx++) {
-          int rr = (int)r0[bx * 2]     - bl;
-          int g1 = (int)r0[bx * 2 + 1] - bl;
-          int g2 = (int)r1[bx * 2]     - bl;
-          int bb = (int)r1[bx * 2 + 1] - bl;
+          int rr = ((int)r0[bx * 2]     - bl) * idg / 100;
+          int g1 = ((int)r0[bx * 2 + 1] - bl) * idg / 100;
+          int g2 = ((int)r1[bx * 2]     - bl) * idg / 100;
+          int bb = ((int)r1[bx * 2 + 1] - bl) * idg / 100;
           int gg = (g1 + g2) >> 1;
           uint8_t R8 = lut[cl(rr * wbr / 100)];
           uint8_t G8 = lut[cl(gg)];

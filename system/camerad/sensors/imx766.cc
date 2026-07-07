@@ -21,7 +21,8 @@ const float sensor_analog_gains_IMX766[] = {
     // [op9ae] extended range: the IMX766 FLL is pinned at native timing so exposure caps at ~33ms
     // (vs stock's 50ms); the custom 0x0B8E gain reg supports up to 64x (gain*64 <= 4095), so allow
     // more analog gain to reach stock-equivalent brightness. Stock swept this sensor to ~64x.
-    16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0};
+    16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0,
+    34.0, 36.0, 38.0, 40.0, 44.0, 48.0, 52.0, 56.0, 60.0, 64.0};  // [op9] stock reaches 64x in the dark
 
 // [op9ae] Standard Sony analog gain code (gain = 1024/(1024-code)). UNUSED on the IMX766:
 // this sensor uses the custom 0x0B8E gain register (gain*64) instead (see getExposureRegisters).
@@ -135,7 +136,7 @@ IMX766::IMX766() {
   exposure_time_max = getenv("OP9_AE_MAXT") ? atoi(getenv("OP9_AE_MAXT")) : 3300;
   analog_gain_min_idx = 0x0;
   analog_gain_rec_idx = 0x0;
-  analog_gain_max_idx = 66;  // [op9ae] 32.0x via custom 0x0B8E (compensates the FLL-capped ~33ms exposure)
+  analog_gain_max_idx = 76;  // [op9ae] 64.0x via custom 0x0B8E (stock reaches 64x in the dark; compensates FLL-capped exposure)
   analog_gain_cost_delta = -1;
   analog_gain_cost_low = 0.4;
   analog_gain_cost_high = 6.4;
