@@ -15,8 +15,8 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.sunnypilot.selfdrive.pandad.rivian_long_flasher import flash_rivian_long
 
 
-def get_expected_signature() -> bytes:
-  fn = os.path.join(FW_PATH, McuType.H7.config.app_fn)
+def get_expected_signature(mcu_type: McuType) -> bytes:
+  fn = os.path.join(FW_PATH, mcu_type.config.app_fn)
   return Panda.get_signature_from_firmware(fn)
 
 def flash_panda(panda_serial: str):
@@ -28,7 +28,7 @@ def flash_panda(panda_serial: str):
     panda.close()
     return
 
-  fw_signature = get_expected_signature()
+  fw_signature = get_expected_signature(panda.get_mcu_type())
   internal_panda = panda.is_internal()
 
   panda_version = "bootstub" if panda.bootstub else panda.get_version()
@@ -72,6 +72,14 @@ def check_panda_support(panda_serials: list[str]) -> list[str]:
     panda.close()
     if is_internal:
       return [serial]
+
+  # PC installations use one USB-connected Black Panda without an internal Panda.
+  if len(panda_serials) == 1:
+    panda = Panda(panda_serials[0])
+    hw_type = panda.get_type()
+    panda.close()
+    if hw_type == Panda.HW_TYPE_BLACK:
+      return panda_serials
 
   return []
 
