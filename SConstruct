@@ -281,7 +281,7 @@ SConscript([
   'openpilot/system/loggerd/SConscript',
 ])
 
-if arch == "comma_arm64":
+if arch != "Darwin":
   SConscript(['openpilot/system/camerad/SConscript'])
 
 # Build selfdrive
